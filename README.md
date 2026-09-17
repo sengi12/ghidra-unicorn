@@ -77,21 +77,32 @@ appears in the Launch dropdown (the menu next to the debug button).
 This walks the afl-unicorn `samples/simple` target, a raw MIPS32 big-endian
 blob, through the Debugger.
 
-1. Import the binary: **File → Import File**, pick
+1. Get the binary into a project. Either let a script do it:
+
+   ```
+   GHIDRA_INSTALL_DIR=... AFL_UNICORN_DIR=... python tools/setup_project.py
+   ```
+
+   which creates `~/ghidra_projects/unicorn/unicorn.gpr` with
+   `simple_target.bin` imported as MIPS:BE:32 at base `0x100000` and
+   analyzed (needs pyghidra: `pip install --no-index -f
+   $GHIDRA_INSTALL_DIR/Ghidra/Features/PyGhidra/pypkg/dist pyghidra`). Or by
+   hand: **File → Import File**, pick
    `afl-unicorn/unicorn_mode/samples/simple/simple_target.bin`, choose
    *Raw Binary* with language **MIPS:BE:32:default**, and under *Options*
    set the base address to `0x100000` (the harness loads the code there).
-   Open it in the CodeBrowser, say yes to analysis.
-2. Switch to the **Debugger** tool (Tool → Run Tool → Debugger, or drag the
-   program onto the Debugger icon in the project window). Do the one-time
-   setup from *Install* above if you have not: Edit → Tool Options →
-   Debugger → *Paths to search for user-created debugger launchers*.
+2. Open the project in Ghidra (**File → Open Project**), then open the
+   program in the **Debugger** tool: drag `simple_target.bin` onto the
+   Debugger icon in the Tool Chest at the bottom of the project window. One
+   time only: in the Debugger, **Edit → Tool Options → Debugger → Script
+   Paths**, add this checkout's `debugger-launchers` directory.
 3. Launch: click the dropdown next to the debug button and pick **unicorn**.
    In the dialog:
    - *Harness*: `examples/afl_unicorn_simple.py` from this repository
    - *Input*: `samples/simple/sample_inputs/sample1.bin`
-   - *python command*: a Python with unicorn, protobuf and capstone. With
-     pyenv: `~/.pyenv/versions/ghidra/bin/python`. Leave *Image* as filled.
+   - *python command*: leave `python3`; the launcher picks a `.venv` in this
+     checkout or a pyenv virtualenv named `ghidra` if one exists, otherwise
+     name a Python that has unicorn and protobuf. Leave *Image* as filled.
    Press Launch. A terminal opens with the context printout, and the
    Dynamic Listing lands on `0x100000`.
 4. Look around: the **Registers** window lists every MIPS register; the
@@ -235,6 +246,7 @@ debugger-launchers/local-unicorn.sh   the launcher Ghidra shows in its menu
 examples/      harnesses
 tests/         pytest, no Ghidra needed (58 tests)
 tools/e2e_ghidra.py   drives a real Ghidra through the whole flow
+tools/setup_project.py  makes a project with the sample imported
 ```
 
 `target.py` knows nothing about Ghidra and `commands.py`/`methods.py` know

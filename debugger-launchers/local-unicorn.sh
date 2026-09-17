@@ -37,4 +37,17 @@ repo="$(cd "$here/.." && pwd)"
 # ghidratrace ships with Ghidra; ghidraunicorn is this checkout.
 export PYTHONPATH="$repo:$MODULE_Debugger_rmi_trace_HOME/pypkg/src:$PYTHONPATH"
 
-exec "$OPT_PYTHON_EXE" -m ghidraunicorn
+# With the default "python3", prefer an interpreter that has unicorn installed:
+# a .venv in this checkout, then a pyenv virtualenv named "ghidra".
+python="$OPT_PYTHON_EXE"
+if [ "$python" = "python3" ]; then
+	for candidate in "$repo/.venv/bin/python" "$HOME/.pyenv/versions/ghidra/bin/python"; do
+		if [ -x "$candidate" ] && "$candidate" -c 'import unicorn' 2>/dev/null; then
+			python="$candidate"
+			break
+		fi
+	done
+fi
+echo "ghidra-unicorn: using $python"
+
+exec "$python" -m ghidraunicorn

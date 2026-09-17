@@ -271,6 +271,10 @@ def run_checks():
 
     result.close()
     log('ALL CHECKS PASSED')
+    # Do not leave the temp project behind: Ghidra would offer to reopen it.
+    import shutil
+    gp.close()
+    shutil.rmtree(projdir, ignore_errors=True)
 
 
 def worker():
