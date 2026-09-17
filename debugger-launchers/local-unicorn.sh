@@ -27,6 +27,7 @@
 #@env OPT_INPUT:file="" "Input" "Input file passed to the harness's create()."
 #@env OPT_START:str="" "Start" "Address to start at (hex). Empty: the PC the harness or dump set."
 #@env OPT_END:str="" "End" "Address that ends the run (hex). Empty: the harness's END, if any."
+#@env OPT_REGS:str="" "Registers" "Initial register overrides, e.g. cpsr=0x60000030,r0=1 (flags like ZF=1 work too)."
 #@env OPT_PRELOAD:bool=true "Preload memory" "Copy all mapped memory into the trace at launch (capped at 32 MiB)."
 #@env OPT_PYTHON_EXE:file="python3" "python command" "Python 3 with unicorn (and protobuf) installed. Omit the path to resolve using PATH."
 

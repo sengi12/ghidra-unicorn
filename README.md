@@ -36,8 +36,17 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   populated immediately. Everything else is read on demand.
 - **Architectures**: x86-64, x86, AArch64 (LE/BE), ARM (LE/BE, ARM and
   Thumb), MIPS32 and MIPS64 (LE/BE). Adding one is a table in `arch.py`.
-- **A Python prompt** in the launcher's terminal with `target` and `uc` in
-  scope, and an `execute` remote method, for anything the buttons don't cover.
+- **Flags as registers**: cpsr, nzcv and eflags are decomposed into the
+  one-byte flag registers Ghidra defines (NG/ZR/CY/OV, CF/ZF/SF/OF, ...), so
+  each shows as its own editable row in the Registers window and editing one
+  recomposes the status register. Every other bit field (ARM mode, I/F/A
+  masks, T, E, IOPL...) is reachable by name from the console.
+- **A gef-style console** in the launcher's terminal: on every stop it
+  prints the reason, registers with changed values highlighted and pointers
+  dereferenced, the decoded status register, disassembly around PC and the
+  stack; and it takes short commands (`c`, `si`, `ni`, `b`, `watch`, `x/8xw`,
+  `r cpsr.M 0x13`...). Anything else is Python with `target` and `uc` in
+  scope.
 
 Tested with Ghidra 12.1.3 (JDK 21) and Unicorn 2.1.
 
@@ -62,6 +71,47 @@ Tested with Ghidra 12.1.3 (JDK 21) and Unicorn 2.1.
 
 That is all. Open a program, switch to the Debugger tool, and **unicorn**
 appears in the Launch dropdown (the menu next to the debug button).
+
+## Try it (five minutes)
+
+This walks the afl-unicorn `samples/simple` target, a raw MIPS32 big-endian
+blob, through the Debugger.
+
+1. Import the binary: **File → Import File**, pick
+   `afl-unicorn/unicorn_mode/samples/simple/simple_target.bin`, choose
+   *Raw Binary* with language **MIPS:BE:32:default**, and under *Options*
+   set the base address to `0x100000` (the harness loads the code there).
+   Open it in the CodeBrowser, say yes to analysis.
+2. Switch to the **Debugger** tool (Tool → Run Tool → Debugger, or drag the
+   program onto the Debugger icon in the project window). Do the one-time
+   setup from *Install* above if you have not: Edit → Tool Options →
+   Debugger → *Paths to search for user-created debugger launchers*.
+3. Launch: click the dropdown next to the debug button and pick **unicorn**.
+   In the dialog:
+   - *Harness*: `examples/afl_unicorn_simple.py` from this repository
+   - *Input*: `samples/simple/sample_inputs/sample1.bin`
+   - *python command*: a Python with unicorn, protobuf and capstone. With
+     pyenv: `~/.pyenv/versions/ghidra/bin/python`. Leave *Image* as filled.
+   Press Launch. A terminal opens with the context printout, and the
+   Dynamic Listing lands on `0x100000`.
+4. Look around: the **Registers** window lists every MIPS register; the
+   **Memory** window shows three regions (code, stack, input); the
+   **Modules** window shows `simple_target.bin` at `0x100000` and the
+   listing shows the static analysis mapped onto the trace.
+5. Set a breakpoint: in the Dynamic Listing go to `0x100040` (`lbu $v0,
+   ($v0)`, the first read of the input), right-click → *Toggle Breakpoint*.
+   Press **Resume** (F5). The target stops there; the **Time** window has a
+   new snapshot, the terminal prints the new context with `v0` pointing at
+   `0x300000 -> 'abcd'`.
+6. Step with F8 / F10, edit `v0` in the Registers window, watch the input
+   with a write watchpoint on `0x300000` from the Breakpoints window, or
+   type in the terminal: `x/4xw 0x300000`, `r a0 0x1234`, `si 3`, `c`.
+7. Press **Resume** again with no breakpoints: the target reaches the end of
+   `main` and the process shows as *Terminated*. The emulator stays alive for
+   inspection until you close the terminal or the target.
+
+Replace the input with one from `output/crashes/` after a fuzzing run and
+step 5 is your crash triage.
 
 ## Use
 
@@ -113,6 +163,19 @@ The registers, memory map and contents come from the dump; the dumped
 segments' object-file names become modules, so a program you imported from
 the same binary maps automatically.
 
+### Presetting registers
+
+The launcher's *Registers* field takes `NAME=VALUE` pairs, so a harness can
+stay generic while you pick the CPU state per run:
+
+```
+cpsr=0x600001d3          # ARM: N=0 Z=1 C=1 V=0, SVC mode, I/F masked
+cpsr.M=0x10, cpsr.T=1    # or by field: user mode, Thumb
+ZF=1, rflags.IOPL=3      # x86: Ghidra flag names or fields
+```
+
+Flag and field names are the same ones the console's `fields` command lists.
+
 ### While it runs
 
 - The Debugger's Resume, Interrupt, Step Into, Step Over buttons and the
@@ -123,8 +186,33 @@ the same binary maps automatically.
   invalid instruction...) stops with the error text in the process's
   *Reason* attribute and leaves PC on the faulting instruction so you can
   inspect it.
-- The launcher's terminal is a Python prompt: `target.regs()`,
-  `target.step()`, `uc.mem_read(...)`, `target.add_watchpoint(addr, 4, "WRITE")`.
+- The launcher's terminal is the console. On each stop, whether you pressed a
+  Ghidra button or typed a command, it prints:
+
+  ```
+  ● Breakpoint 1 at 0x100040
+  ───────────────────────────────────────────────────────[ registers ]
+  v0      0x00300000 -> 0x61626364 'abcd'
+  ...
+  sp      0x0020ffe8 -> 0x00000000
+  pc      0x00100040 -> 0x90420000
+  ─────────────────────────────────────────────────────[ disassembly ]
+     0x10003c  8fc20008         lw       $v0, 8($fp)
+   → 0x100040  90420000         lbu      $v0, ($v0)
+     0x100044  2c420011         sltiu    $v0, $v0, 0x11
+  ───────────────────────────────────────────────────────────[ stack ]
+  0x20ffe8│+0x000: 0x00000000
+  0x20fff0│+0x008: 0x00300000 -> 0x61626364 'abcd'
+  ```
+
+  Changed registers are red, pointers into code/stack/data are coloured by
+  kind, the status register line shows every field by name
+  (`cpsr 0x600001d3 [ n Z C v q ... I F t M=SVC ]`). `help` lists the
+  commands: `c`, `si N`, `ni N`, `adv ADDR`, `b ADDR`, `watch ADDR SIZE w`,
+  `d N`, `bl`, `x/8xw ADDR`, `x/s ADDR`, `r NAME VALUE`, `r cpsr.M 0x13`,
+  `fields`, `m ADDR HEXBYTES`, `ctx`, `k`, `q`. Addresses accept registers and
+  `reg+off`. Everything else is Python with `target`, `uc`, `commands`.
+  Set `NO_COLOR=1` to turn colour off.
 
 Pair it with [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov) to
 paint the fuzzer's coverage over the same listing you are stepping through.
@@ -140,10 +228,12 @@ ghidraunicorn/
   commands.py   writes target state into the trace (objects, regs, memory)
   methods.py    the remote methods Ghidra invokes (resume, step, break_*, ...)
   hooks.py      stop/continue events -> snapshots
-  __main__.py   entry point: connect, load, publish, then REPL
+  context.py    the gef-style context printout
+  console.py    the terminal commands on top of a Python console
+  __main__.py   entry point: connect, load, publish, then console
 debugger-launchers/local-unicorn.sh   the launcher Ghidra shows in its menu
 examples/      harnesses
-tests/         pytest, no Ghidra needed (49 tests)
+tests/         pytest, no Ghidra needed (58 tests)
 tools/e2e_ghidra.py   drives a real Ghidra through the whole flow
 ```
 
@@ -180,6 +270,23 @@ The end-to-end test creates a project, imports `simple_target.bin`, creates a
 Debugger tool, launches the *unicorn* offer through the real launcher script
 and checks the trace Ghidra built: registers, preloaded bytes, module, then
 step, step-over, breakpoint, resume, register write, and run-to-end.
+
+## Where the pretty output lives
+
+Ghidra's Debugger already has the windows a gef/pwndbg context is made of,
+and this connector feeds all of them: **Registers** (with the flag bits as
+rows), **Dynamic Listing** (disassembly that follows PC, with breakpoint
+markers), **Memory** and **Bytes** views, **Stack**, **Watches** (typed
+expressions like `*:4 sp+8`), **Breakpoints**, **Time** (every stop is a
+snapshot you can step back to), and **Model** (the raw object tree). The
+terminal context is for when the terminal is what you are looking at.
+
+A single "context" panel inside Ghidra, with pointer chains and stack
+annotations like the terminal one, would be a small Ghidra script with a
+docking `ComponentProvider` (the pattern ghidra-hexEditor and ghidra-aflcov
+use) that reads the current trace's registers and memory through
+`DebuggerTraceManagerService` and repaints on snapshot change. It needs no
+change on this side: everything it would show is already in the trace.
 
 ## Limitations and ideas
 

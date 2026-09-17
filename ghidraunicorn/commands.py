@@ -271,6 +271,8 @@ def putreg() -> Dict[str, List[str]]:
         values.append(RegVal(r.name, v.to_bytes(r.size, 'big')))
     for name, v in target.spec.context.items():
         values.append(RegVal(name, v.to_bytes(1, 'big')))
+    for name, v in target.flags().items():
+        values.append(RegVal(name, bytes([v])))
     missing = trace.put_registers(space, values)
     if isinstance(missing, list) and missing:
         return {'missing': missing}

@@ -97,11 +97,53 @@ class UnicornTarget:
 
     # ---- registers -------------------------------------------------------
 
+    def _field(self, name: str):
+        """'cpsr.M' -> (status register, Field) or None."""
+        if '.' not in name:
+            return None
+        reg, fname = name.split('.', 1)
+        if self.spec.status is None or reg.lower() != self.spec.status.lower():
+            raise KeyError(f'{reg} has no fields (status register is {self.spec.status})')
+        fld = self.spec.field(fname)
+        if fld is None:
+            raise KeyError(f'{reg} has no field {fname}; fields: '
+                           + ', '.join(f.name for f in self.spec.fields))
+        return self.spec.reg(reg), fld
+
     def reg_read(self, name: str) -> int:
+        rf = self._field(name)
+        if rf is not None:
+            return rf[1].get(self.uc.reg_read(rf[0].uc))
+        f = self.spec.flag(name)
+        if f is not None:
+            return (self.uc.reg_read(self.spec.reg(f.source).uc) >> f.bit) & 1
         return self.uc.reg_read(self.spec.reg(name).uc)
 
     def reg_write(self, name: str, value: int) -> None:
+        rf = self._field(name)
+        if rf is not None:
+            cur = self.uc.reg_read(rf[0].uc)
+            self.uc.reg_write(rf[0].uc, rf[1].set(cur, value))
+            return
+        f = self.spec.flag(name)
+        if f is not None:
+            src = self.spec.reg(f.source)
+            cur = self.uc.reg_read(src.uc)
+            self.uc.reg_write(src.uc, self.spec.set_flag(cur, name, bool(value)))
+            return
         self.uc.reg_write(self.spec.reg(name).uc, value)
+
+    def fields(self) -> List[Tuple[str, str]]:
+        """Decoded fields of the status register, MSB first."""
+        if self.spec.status is None:
+            return []
+        return self.spec.decode_fields(self.uc.reg_read(self.spec.reg(self.spec.status).uc))
+
+    def flags(self) -> Dict[str, int]:
+        """Ghidra's one-byte flag registers decoded from the status register."""
+        if self.spec.status is None:
+            return {}
+        return self.spec.decode_flags(self.uc.reg_read(self.spec.reg(self.spec.status).uc))
 
     def pc(self) -> int:
         return self.reg_read(self.spec.pc)

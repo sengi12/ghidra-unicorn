@@ -54,3 +54,18 @@ def test_every_register_is_readable():
             v = uc.reg_read(r.uc)
             assert isinstance(v, int), (key, r.name)
             assert v < (1 << (8 * r.size)) or r.name in ('FS_OFFSET', 'GS_OFFSET'), (key, r.name, v)
+
+
+def test_flags_decode_and_set():
+    s = arch.spec_for_key('x64')
+    names = [f.name for f in s.flags]
+    assert names[:5] == ['CF', 'PF', 'AF', 'ZF', 'SF'] and s.status == 'rflags'
+    d = s.decode_flags(0x246)
+    assert d['ZF'] == 1 and d['PF'] == 1 and d['IF'] == 1 and d['CF'] == 0
+    assert s.set_flag(0x246, 'CF', True) == 0x247
+    assert s.set_flag(0x247, 'ZF', False) == 0x207
+    a = arch.spec_for_key('armle')
+    assert a.decode_flags(0xa0000010) == {'NG': 1, 'ZR': 0, 'CY': 1, 'OV': 0, 'Q': 0,
+                                          'GE4': 0, 'GE3': 0, 'GE2': 0, 'GE1': 0, 'TB': 0}
+    assert arch.spec_for_key('arm64le').decode_flags(0x60000000) == {'NG': 0, 'ZR': 1, 'CY': 1, 'OV': 0}
+    assert arch.spec_for_key('mips').flags == ()

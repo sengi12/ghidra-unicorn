@@ -189,3 +189,16 @@ def test_mips_big_endian_spec():
     t = UnicornTarget(uc)
     assert t.spec.key == 'mips' and t.spec.language == 'MIPS:BE:32:default'
     assert t.spec.reg('ra').size == 4 and t.spec.has_reg('s8')
+
+
+def test_flag_registers_read_and_write():
+    t = make_x64()
+    t.step()                       # mov rax, 1 -> flags untouched, but readable
+    assert set(t.flags()) >= {'CF', 'ZF', 'SF', 'OF'}
+    t.reg_write('rflags', 0x202)
+    assert t.reg_read('ZF') == 0
+    t.reg_write('ZF', 1)
+    assert t.reg_read('rflags') == 0x242 and t.reg_read('zf') == 1
+    t.reg_write('CF', 1)
+    t.reg_write('ZF', 0)
+    assert t.reg_read('rflags') == 0x203

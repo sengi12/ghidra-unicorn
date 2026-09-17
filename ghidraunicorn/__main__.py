@@ -5,7 +5,6 @@ debugger-launchers/local-unicorn.sh. Every option can also be given on the
 command line, which is how the tests drive it.
 """
 import argparse
-import code
 import os
 import sys
 import threading
@@ -48,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help='program image path, used to name the module (OPT_TARGET_IMG)')
     p.add_argument('--start', default=_env('OPT_START'), help='start address (OPT_START)')
     p.add_argument('--end', default=_env('OPT_END'), help='stop address (OPT_END)')
+    p.add_argument('--regs', default=_env('OPT_REGS'),
+                   help='initial register overrides, e.g. "cpsr=0x60000030,r0=1" (OPT_REGS)')
     p.add_argument('--preload', default=_env('OPT_PRELOAD', 'true'),
                    help='copy all mapped memory into the trace at launch (OPT_PRELOAD)')
     p.add_argument('--preload-cap', type=int, default=32 * 1024 * 1024,
@@ -57,14 +58,34 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_regs(text: Optional[str]) -> dict:
+    """'cpsr=0x60000030, r0=1' -> {'cpsr': 0x60000030, 'r0': 1}"""
+    out = {}
+    if not text:
+        return out
+    for item in text.replace(';', ',').split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '=' not in item:
+            raise SystemExit(f'bad register override {item!r}; expected NAME=VALUE')
+        name, value = item.split('=', 1)
+        out[name.strip()] = int(value.strip(), 0)
+    return out
+
+
 def load(args) -> loaders.Loaded:
     start, end = _addr(args.start), _addr(args.end)
     if args.harness:
-        return loaders.load_harness(args.harness, args.input, start, end, args.image)
-    if args.context:
-        return loaders.load_context(args.context, start, end, args.image)
-    raise SystemExit('Nothing to run: give --harness or --context '
-                     '(OPT_HARNESS / OPT_CONTEXT_DIR in the Ghidra launcher).')
+        loaded = loaders.load_harness(args.harness, args.input, start, end, args.image)
+    elif args.context:
+        loaded = loaders.load_context(args.context, start, end, args.image)
+    else:
+        raise SystemExit('Nothing to run: give --harness or --context '
+                         '(OPT_HARNESS / OPT_CONTEXT_DIR in the Ghidra launcher).')
+    for name, value in parse_regs(args.regs).items():
+        loaded.target.reg_write(name, value)
+    return loaded
 
 
 class _Tee:
@@ -114,10 +135,8 @@ def main(argv=None) -> int:
     if args.no_repl or not sys.stdin.isatty():
         _wait_for_disconnect()
     else:
-        banner = ('ghidra-unicorn: `target` and `uc` are in scope; '
-                  'target.step(), target.run(), target.regs() ... Ctrl-D to quit.')
-        code.interact(banner=banner, local={'target': target, 'uc': target.uc,
-                                            'commands': commands, 'loaded': loaded})
+        from .console import UnicornConsole
+        UnicornConsole(target, loaded).run()
     commands.disconnect()
     return 0
 

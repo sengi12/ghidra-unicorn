@@ -112,6 +112,9 @@ def run_checks():
     Swing.runNow(Runnable @ make_tool)
     tool = holder['tool']
     log(f'created tool {tool.getName()}')
+    show = os.getenv('E2E_SHOW')
+    if show:
+        Swing.runNow(Runnable @ (lambda: tool.setVisible(True)))
 
     opts = tool.getOptions(DebuggerPluginPackage.NAME)
     # TraceRmiLauncherServicePlugin.OPTION_NAME_SCRIPT_PATHS (protected)
@@ -192,8 +195,10 @@ def run_checks():
     assert str(value('Processes[0]', 'State')) == 'STOPPED', value('Processes[0]', 'State')
     assert reg('pc') == CODE_BASE, hex(reg('pc'))
     assert reg('sp') == 0x00210000, hex(reg('sp'))
-    assert mem(CODE_BASE, 16) == code[:16], 'preloaded code bytes differ'
-    assert mem(0x00300000, 4) == open(sample_input, 'rb').read()[:4], 'input bytes not in trace'
+    # Preloaded memory arrives in a batch; wait for the last region.
+    expect_in = open(sample_input, 'rb').read()[:4]
+    wait_until(lambda: mem(CODE_BASE, 16) == code[:16] and mem(0x00300000, 4) == expect_in,
+               'preloaded code and input bytes', 30)
     regions = obj('Processes[0].Memory')
     assert regions is not None
     modname = value('Processes[0].Modules[100000]', 'Name')
@@ -241,6 +246,11 @@ def run_checks():
     assert str(value('Processes[0]', 'Reason')).startswith('Breakpoint 1'), value('Processes[0]', 'Reason')
     assert int(value('Breakpoints[1]', 'Hit Count')) == 1
     log(f'resume to breakpoint OK: {value("Processes[0]", "Reason")}')
+    if show:
+        import subprocess
+        time.sleep(6)
+        subprocess.run(['screencapture', '-x', show], check=False)
+        log(f'screenshot written to {show}')
 
     # Registers are writable from Ghidra.
     invoke('write_reg', frame=frame_obj, name='a0', value=jpype.JArray(jpype.JByte)(bytes([0, 0, 0x12, 0x34])))
