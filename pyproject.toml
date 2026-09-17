@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghidraunicorn"
+version = "0.1.0"
+description = "Unicorn Engine as a Ghidra Debugger back-end over Trace RMI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Michael Sengelmann" }]
+dependencies = [
+    "unicorn>=2.0",
+    "protobuf>=6.31.0",
+]
+
+[project.optional-dependencies]
+# Step-over needs an instruction decoder to recognise calls.
+capstone = ["capstone>=5"]
+# The Trace RMI client is also shipped inside every Ghidra release under
+# Ghidra/Debug/Debugger-rmi-trace/pypkg/dist; the launcher uses that copy.
+ghidra = ["ghidratrace>=12.1"]
+test = ["pytest", "capstone>=5", "ghidratrace>=12.1"]
+
+[project.urls]
+Homepage = "https://github.com/sengi12/ghidra-unicorn"
+
+[tool.setuptools]
+packages = ["ghidraunicorn"]
+
+[tool.setuptools.package-data]
+ghidraunicorn = ["schema.xml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
