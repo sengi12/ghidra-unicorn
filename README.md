@@ -350,6 +350,14 @@ use) that reads the current trace's registers and memory through
 `DebuggerTraceManagerService` and repaints on snapshot change. It needs no
 change on this side: everything it would show is already in the trace.
 
+## What is planned
+
+[TODO.md](TODO.md) is the roadmap and [CHANGELOG.md](CHANGELOG.md) records
+what has shipped. The short version of what is coming: reverse execution, so
+Ghidra's step-back buttons work; batch crash triage over an afl-unicorn
+crashes directory; more processors and a Windows launcher; symbols and
+syscall stubs; and a coverage handoff to ghidra-aflcov.
+
 ## Limitations and ideas
 
 - One thread, one frame. Ghidra unwinds the stack itself from registers and
