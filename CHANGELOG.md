@@ -9,6 +9,18 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Reverse execution.** The processor context is checkpointed every few
+  thousand instructions, along with only the pages written since the previous
+  checkpoint, so stepping backwards means restoring the nearest checkpoint and
+  replaying forward with breakpoints and events silenced. `resume_back`,
+  `step_back_into` and `step_back_over` carry the action names and icons
+  Ghidra's toolbar already draws, so its step-back buttons light up, and the
+  console gains `rsi`, `rni`, `rc`, `goto` and `icount`. Old checkpoints are
+  folded into the base rather than discarded when the memory budget is
+  reached, so history stays exact and the connector reports honestly how far
+  back it can still reach. Verified against Ghidra 12.1.3: stepping back and
+  forward again returns to the same instruction.
+
 - **Basic-block coverage recording** in `coverage.py`: a `UC_HOOK_BLOCK`
   recorder that sorts blocks into modules and writes drcov version 2, the
   format ghidra-aflcov, Lighthouse and Dragondance read. Blocks outside every
@@ -67,6 +79,31 @@ Notable changes to ghidra-unicorn. The format follows
   the same options as the Unix one, following Ghidra's own launcher
   conventions for each file type. They are unverified on Windows: there was
   no Windows machine to run them on.
+
+### Fixed
+
+- **Stepping toward an end address that is a branch delay slot no longer
+  loops forever.** The end was handed to Unicorn as a stop address even when
+  stepping, and Unicorn leaves the program counter on the branch when the
+  stop address is its delay slot, so every step re-executed that branch and
+  applied its stack adjustment again. Only a free run passes the end address
+  now; a step is bounded by its instruction count.
+- **Arriving at an exit address while stepping ends the run.** Unicorn's
+  instruction count returns before the next instruction's hook fires, so a
+  step that landed on an exit used to walk straight past what a free run
+  stops at.
+- **A stop forced by an unrelated hook is no longer reported as
+  termination.** With an end address declared, anything else calling
+  `emu_stop` was described as having reached it. Only a program counter
+  within one instruction of the target counts as arriving, which still covers
+  the delay-slot case.
+- **The refused access is carried on the stop event.** A `UcError` holds only
+  an error number, so the faulting address and access kind now come from an
+  invalid-memory hook in the target, and the triage report no longer needs
+  its own copy.
+- **Flag registers may be more than one bit wide**, which brings m68k's
+  three-bit interrupt level and PowerPC's seven-bit `xer_count` into the
+  Registers window as editable rows instead of read-only fields.
 
 ### Changed
 

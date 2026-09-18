@@ -5,15 +5,6 @@ Shipped work moves to [CHANGELOG.md](CHANGELOG.md).
 
 Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
-## In flight
-
-- [~] **Reverse execution (time travel).** Checkpoint the CPU context every N
-  instructions plus the pages dirtied since the last checkpoint; step back by
-  restoring the nearest checkpoint and replaying forward. Wire
-  `resume_back`, `step_back_into` and `step_back_over` so Ghidra's existing
-  step-back toolbar buttons work, and add `rsi`/`rni`/`rc`/`goto` to the
-  console. Only an emulator can offer this without something like rr.
-
 ## Next
 
 - [~] **Symbols from Ghidra.** `symbols.py` and `tools/export_symbols.py`
@@ -65,23 +56,25 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Known bugs
 
-- [ ] **A flag register must be one bit wide.** `Flag` carries a single bit
-  position, so the wider status fields Ghidra does model as registers stay
-  fields only and cannot be edited in the Registers window: m68k's three-bit
-  interrupt level and PowerPC's seven-bit `xer_count`. Giving `Flag` a width
-  and routing it through the field accessors would cover both.
+- [ ] **Reverse execution cannot rewind a mapping.** A region mapped after
+  the base checkpoint stays mapped when you go back to before it existed.
+  Missing regions are restored; extra ones are not unmapped.
+- [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
+  hits, and it does not adjust hit counts as it passes them.
+- [ ] **Step-over backwards replays the whole retained history** to work out
+  call depth, so it costs time proportional to what is kept rather than to
+  the distance travelled.
 
-- [ ] **A stop forced from outside is reported as termination.** When a hook
-  that the target does not own calls `emu_stop` and the harness declared an
-  end address, `_emulate` takes its "reached the end" branch and returns
-  `exit`, even though the end was never reached. Triage works around it by
-  tracking its own instruction counter. The honest answer is `stopped`
-  whenever the program counter is not actually at the end or the requested
-  address.
-- [ ] **A fault's address is not on the stop event.** `UcError` carries only
-  an error number, so anything wanting the faulting access has to install its
-  own invalid-memory hook, as triage does. The target could record it once
-  and put it on the event.
+Fixed, kept here until the next release notes ship:
+
+- [x] A flag register had to be exactly one bit, which kept m68k's interrupt
+  level and PowerPC's `xer_count` out of the Registers window.
+- [x] A stop forced by an unrelated hook was reported as termination when an
+  end address had been declared.
+- [x] A fault's address was not on the stop event, so every caller installed
+  its own invalid-memory hook.
+- [x] Stepping toward an end address that is a branch delay slot looped
+  forever, re-applying that instruction's side effects each time.
 
 ## Known limitations
 

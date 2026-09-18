@@ -25,6 +25,13 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
     `unicorn_dumper_pwndbg.py` (`_index.json` plus segments), loaded natively.
 - **Execution control**: resume, interrupt, step into, step over (runs
   through calls when Capstone is installed), advance to address, kill.
+- **Reverse execution.** Ghidra's step-back and reverse-continue buttons
+  work, because the connector checkpoints the processor state every few
+  thousand instructions along with the pages written since the last
+  checkpoint, and steps backwards by restoring the nearest checkpoint and
+  replaying forward in silence. With gdb this needs rr; with an emulator it
+  falls out of the design. `goto` jumps to any instruction number in the
+  recorded history.
 - **Breakpoints and watchpoints** from Ghidra's Breakpoints window or the
   Listing: execute, read, write and access. A breakpoint stops *before* its
   instruction; a watchpoint stops *after* the accessing instruction completes,
@@ -226,7 +233,8 @@ Flag and field names are the same ones the console's `fields` command lists.
   (`cpsr 0x600001d3 [ n Z C v q ... I F t M=SVC ]`). `help` lists the
   commands: `c`, `si N`, `ni N`, `adv ADDR`, `b ADDR`, `watch ADDR SIZE w`,
   `d N`, `bl`, `x/8xw ADDR`, `x/s ADDR`, `r NAME VALUE`, `r cpsr.M 0x13`,
-  `fields`, `m ADDR HEXBYTES`, `ctx`, `k`, `q`. Addresses accept registers and
+  `fields`, `m ADDR HEXBYTES`, `ctx`, `k`, `q`, and going backwards with
+  `rsi N`, `rni N`, `rc`, `goto N` and `icount`. Addresses accept registers and
   `reg+off`. Everything else is Python with `target`, `uc`, `commands`.
   Set `NO_COLOR=1` to turn colour off.
 
@@ -379,6 +387,7 @@ Wiring them to a console command and a launcher option is on the
 ghidraunicorn/
   arch.py       Unicorn arch/mode <-> Ghidra language ID, register tables
   target.py     UnicornTarget: run/step/interrupt, breakpoints, watchpoints
+  timeline.py   checkpoints and page deltas, for going backwards
   loaders.py    harness files and afl-unicorn context directories
   schema.xml    the object model Ghidra's Debugger windows expect
   commands.py   writes target state into the trace (objects, regs, memory)
@@ -396,7 +405,7 @@ debugger-launchers/    the launchers Ghidra shows in its menu:
   local-unicorn.ps1      Windows, PowerShell
   local-unicorn.bat      Windows, cmd, via local-unicorn-win.py
 examples/      harnesses
-tests/         pytest, no Ghidra needed (106 tests, incl. a real-pty test)
+tests/         pytest, no Ghidra needed (166 tests, incl. a real-pty test)
 tools/e2e_ghidra.py     drives a real Ghidra through the whole flow
 tools/setup_project.py  makes a project with the sample imported
 tools/export_symbols.py exports a program's symbols as JSON
@@ -469,9 +478,12 @@ syscall stubs; and a coverage handoff to ghidra-aflcov.
 - Step-over needs Capstone to recognise calls; without it, it steps into.
 - Thumb harnesses get the `ARM:LE:32:v8T` language. Mixed ARM/Thumb code
   would need context-register tracking.
-- Ideas: a `unicorn_dumper_ghidra.py` that dumps a *Ghidra* trace (from gdb)
-  into an afl-unicorn context; time-travel by re-running from snapshot 0 with
-  an instruction count; syscall stubs as Python hooks editable from Ghidra.
+- Going backwards is bounded by what is kept: checkpoints are dropped oldest
+  first once they exceed the memory budget, and the connector says how far
+  back it can still reach rather than guessing.
+- Reverse-continue finds execute breakpoints, not watchpoint hits.
+- [TODO.md](TODO.md) has the rest of the roadmap, including syscall stubs and
+  a context panel inside Ghidra.
 
 ## License
 

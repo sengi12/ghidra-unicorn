@@ -32,8 +32,9 @@ from dataclasses import dataclass, field
 import threading
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
-                     UC_MEM_WRITE, Uc, UcError)
+from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
+                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, Uc, UcError)
+from unicorn import unicorn_const as _uc_const
 
 from .arch import ArchSpec, spec_for_uc
 from .timeline import DEFAULT_BUDGET, DEFAULT_INTERVAL, Timeline
@@ -41,6 +42,18 @@ from .timeline import DEFAULT_BUDGET, DEFAULT_INTERVAL, Timeline
 PAGE = 0x1000
 
 READ, WRITE, ACCESS, EXECUTE = 'READ', 'WRITE', 'READ,WRITE', 'SW_EXECUTE'
+
+#: How far behind a requested stop address Unicorn may leave the program
+#: counter and still be considered to have arrived: one instruction, and the
+#: longest instruction of any architecture here is 15 bytes.
+ARRIVAL_SLACK = 16
+
+_ACCESS_NAMES = {getattr(_uc_const, n): n for n in dir(_uc_const)
+                 if n.startswith('UC_MEM_')}
+
+
+def _arrived_at(pc: int, target: Optional[int]) -> bool:
+    return target is not None and 0 <= target - pc <= ARRIVAL_SLACK
 
 
 class TargetError(Exception):
@@ -75,6 +88,11 @@ class StopEvent:
     description: str
     breakpoint: Optional[Breakpoint] = None
     error: Optional[UcError] = None
+    #: For a fault, the access Unicorn refused. UcError itself carries only an
+    #: error number, so these come from an invalid-memory hook.
+    fault_address: Optional[int] = None
+    fault_access: Optional[str] = None
+    fault_size: Optional[int] = None
 
     @property
     def terminated(self) -> bool:
@@ -106,6 +124,8 @@ class UnicornTarget:
         self.exit_description = ''
         self.listeners: List[Callable[[StopEvent], None]] = []
         self._code_hook = uc.hook_add(UC_HOOK_CODE, self._on_code)
+        self._fault: Optional[Tuple[str, int, int]] = None
+        uc.hook_add(UC_HOOK_MEM_INVALID, self._on_invalid)
         self._cs = None
         self.timeline = Timeline(uc, interval=checkpoint_interval,
                                  budget=memory_budget, enabled=record)
@@ -136,7 +156,7 @@ class UnicornTarget:
             return rf[1].get(self.uc.reg_read(rf[0].uc))
         f = self.spec.flag(name)
         if f is not None:
-            return (self.uc.reg_read(self.spec.reg(f.source).uc) >> f.bit) & 1
+            return f.get(self.uc.reg_read(self.spec.reg(f.source).uc))
         return self.uc.reg_read(self.spec.reg(name).uc)
 
     def reg_write(self, name: str, value: int) -> None:
@@ -150,7 +170,7 @@ class UnicornTarget:
         if f is not None:
             src = self.spec.reg(f.source)
             cur = self.uc.reg_read(src.uc)
-            self.uc.reg_write(src.uc, self.spec.set_flag(cur, name, bool(value)))
+            self.uc.reg_write(src.uc, f.set(cur, int(value)))
             self.timeline.note_external_change()
             return
         self.uc.reg_write(self.spec.reg(name).uc, value)
@@ -273,19 +293,23 @@ class UnicornTarget:
             self._pending = None
             uc.emu_stop()
             return
-        if self._left == 0:
-            # Unicorn's own instruction count overruns after a context_restore
-            # - it will happily run a whole basic block for a count of one -
-            # so the limit is enforced here, where a stop is exact.
-            uc.emu_stop()
-            return
         if self._first:
             self._first = False
             self.timeline.note_instruction()
             self._left -= 1
             return
+        # Arriving at the end is terminal, so it is checked before the
+        # instruction budget. A branch and its delay slot are one step, and the
+        # delay slot can be the end address: checking the budget first would
+        # stop without ever noticing we had arrived.
         if address in self.exits or (self.end is not None and address == self.end):
             self._stop = StopEvent('exit', address, f'Reached exit {address:#x}')
+            uc.emu_stop()
+            return
+        if self._left == 0:
+            # Unicorn's own instruction count overruns after a context_restore
+            # - it will happily run a whole basic block for a count of one -
+            # so the limit is enforced here, where a stop is exact.
             uc.emu_stop()
             return
         bp = self._bp_by_addr.get(address)
@@ -299,6 +323,15 @@ class UnicornTarget:
         # are in now is the state at `timeline.icount`.
         self.timeline.note_instruction()
         self._left -= 1
+
+    def _on_invalid(self, uc, access, address, size, value, user_data) -> bool:
+        """Remember the access Unicorn is about to refuse.
+
+        A UcError carries only an error number, so without this the faulting
+        address is lost. Returning False lets the fault propagate unchanged.
+        """
+        self._fault = (_ACCESS_NAMES.get(access, str(access)), address, size)
+        return False
 
     def _on_write(self, uc, access, address, size, value, user_data) -> bool:
         """Note the pages the program writes, for the next checkpoint's delta."""
@@ -345,10 +378,18 @@ class UnicornTarget:
             self._running = True
         self._stop = None
         self._pending = None
+        self._fault = None
         self._first = True
         self._left = count if count > 0 else -1     # -1: as long as it takes
         start = self._start_pc()
-        stop_at = until if until is not None else (self.end if self.end is not None else 0)
+        # Only a free run hands `end` to Unicorn as its stop address. When
+        # stepping, the instruction count bounds the run and the code hook
+        # reports the end, because Unicorn leaves the program counter on the
+        # *branch* when the stop address is its delay slot: passing `end` here
+        # would re-execute that branch on every step, forever, applying its
+        # side effects each time.
+        stop_at = until if until is not None else (
+            self.end if (self.end is not None and count == 0) else 0)
         error = None
         try:
             self.uc.emu_start(start, stop_at, 0, count)
@@ -366,23 +407,32 @@ class UnicornTarget:
             # The faulting instruction was counted when its hook ran but never
             # completed; PC sits on it, which is the state before it.
             self.timeline.uncount()
-            ev = StopEvent('error', pc, f'{error} at {pc:#x}', error=error)
+            access, faddr, fsize = self._fault or (None, None, None)
+            where = '' if faddr is None else f' touching {faddr:#x}'
+            ev = StopEvent('error', pc, f'{error} at {pc:#x}{where}', error=error,
+                           fault_address=faddr, fault_access=access, fault_size=fsize)
         elif self._stop is not None:
             ev = self._stop
             if ev.reason == 'watchpoint':
                 ev = StopEvent(ev.reason, pc, ev.description, ev.breakpoint)
         elif until is not None and pc == until:
             ev = StopEvent('step', pc, f'Advanced to {pc:#x}')
-        elif self.end is not None and pc == self.end:
-            ev = StopEvent('exit', pc, f'Reached end {pc:#x}')
+        elif pc in self.exits or (self.end is not None and pc == self.end):
+            # Unicorn's instruction count stops the run before the hook for the
+            # next instruction fires, so a step that lands on an exit is only
+            # visible here. Without this, stepping would walk straight past an
+            # exit that a free run stops at.
+            ev = StopEvent('exit', pc, f'Reached exit {pc:#x}')
         elif count > 0:
             ev = StopEvent('step', pc, f'Stepped to {pc:#x}')
         elif self._interrupted:
             ev = StopEvent('interrupt', pc, f'Interrupted at {pc:#x}')
-        elif until is not None or self.end is not None:
-            # emu_start returned on its own: the `until` address was reached.
-            # On MIPS/ARM-with-delay-slots Unicorn stops at the branch when the
-            # target is its delay slot, so PC can sit one instruction short.
+        elif _arrived_at(pc, until if until is not None else self.end):
+            # emu_start returned on its own, just short of where it was told to
+            # stop: with delay slots Unicorn stops on the branch when the stop
+            # address is its slot, leaving PC one instruction behind. Only a PC
+            # that close counts as arriving; anything else is some other hook
+            # calling emu_stop, and claiming the program ended would be a lie.
             target_addr = until if until is not None else self.end
             reason = 'step' if until is not None else 'exit'
             ev = StopEvent(reason, pc, f'Reached {target_addr:#x} (stopped at {pc:#x})')

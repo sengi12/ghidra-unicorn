@@ -370,33 +370,6 @@ class _Budget:
             pass
 
 
-class _FaultRecorder:
-    """Remembers the invalid access behind a Unicorn memory error.
-
-    Unicorn's Python binding gives the raised UcError an errno but not the
-    address; the invalid-memory hook has the address. Returning False from it
-    leaves the fault unhandled, so emulation still stops exactly as it would
-    without the hook.
-    """
-
-    def __init__(self, uc):
-        self.uc = uc
-        self.access: Optional[int] = None
-        self.address: Optional[int] = None
-        self.size: Optional[int] = None
-        self._hook = uc.hook_add(UC_HOOK_MEM_INVALID, self._on_invalid)
-
-    def _on_invalid(self, uc, access, address, size, value, user_data) -> bool:
-        self.access, self.address, self.size = access, address, size
-        return False
-
-    def remove(self) -> None:
-        try:
-            self.uc.hook_del(self._hook)
-        except UcError:
-            pass
-
-
 def _decode(target, pc: Optional[int]) -> Optional[Instruction]:
     if pc is None:
         return None
@@ -474,7 +447,6 @@ def triage_input(harness: str, input_path: str, *,
         cov.start()
     deadline = None if not timeout else started + timeout
     budget = _Budget(target.uc, max_instructions, deadline)
-    faults = _FaultRecorder(target.uc)
     watchdog = None
     if timeout:
         watchdog = threading.Timer(max(timeout - (time.monotonic() - started), 0.0),
@@ -493,7 +465,6 @@ def triage_input(harness: str, input_path: str, *,
         if watchdog is not None:
             watchdog.cancel()
         budget.remove()
-        faults.remove()
         if prov is not None:
             prov.stop()
         if cov is not None:
@@ -507,9 +478,9 @@ def triage_input(harness: str, input_path: str, *,
             kind=error_kind(ev.error),
             errno=getattr(ev.error, 'errno', None),
             message=str(ev.error),
-            address=faults.address,
-            access=None if faults.access is None else _access_kind(faults.access),
-            size=faults.size)
+            address=ev.fault_address,
+            access=ev.fault_access,
+            size=ev.fault_size)
 
     if budget.tripped is not None and ev.reason != 'error':
         outcome, reason = TIMEOUT, budget.tripped

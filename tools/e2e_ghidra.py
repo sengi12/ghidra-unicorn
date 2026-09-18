@@ -253,6 +253,20 @@ def run_checks():
         subprocess.run(['screencapture', '-x', show], check=False)
         log(f'screenshot written to {show}')
 
+    # Reverse execution: these are what Ghidra's step-back buttons invoke.
+    for needed in ('step_back_into', 'step_back_over', 'resume_back'):
+        assert needed in names, f'{needed} missing; have {sorted(names)}'
+    at_break = reg('pc')
+    invoke('step_back_into', thread=thread_obj, n=jpype.JLong(1))
+    wait_until(lambda: reg('pc') != at_break, 'step_back_into to land', 20)
+    back_to = reg('pc')
+    assert back_to < at_break, (hex(back_to), hex(at_break))
+    log(f'step_back_into OK: {at_break:#x} -> {back_to:#x}')
+    # Forward again lands exactly where we were, which is the whole point.
+    invoke('step_into', thread=thread_obj, n=jpype.JLong(1))
+    wait_until(lambda: reg('pc') == at_break, 'stepping forward again', 20)
+    log('reverse then forward returns to the same instruction')
+
     # Registers are writable from Ghidra.
     invoke('write_reg', frame=frame_obj, name='a0', value=jpype.JArray(jpype.JByte)(bytes([0, 0, 0x12, 0x34])))
     wait_until(lambda: reg('a0') == 0x1234, 'a0 write', 20)

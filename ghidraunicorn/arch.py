@@ -35,10 +35,28 @@ class Reg:
 
 @dataclass(frozen=True)
 class Flag:
-    """A one-byte Ghidra flag register that is a bit of a wider register."""
+    """A one-byte Ghidra flag register carved out of a wider register.
+
+    Usually one bit, but Ghidra also defines a few several bits wide, such as
+    m68k's interrupt level and PowerPC's `xer_count`, and those still fit in
+    the byte Ghidra stores them in.
+    """
     name: str
     source: str
     bit: int
+    width: int = 1
+
+    @property
+    def mask(self) -> int:
+        return ((1 << self.width) - 1) << self.bit
+
+    def get(self, value: int) -> int:
+        return (value >> self.bit) & ((1 << self.width) - 1)
+
+    def set(self, value: int, v: int) -> int:
+        if v < 0 or v >= (1 << self.width):
+            raise ValueError(f'{self.name} is {self.width} bit(s); {v:#x} does not fit')
+        return (value & ~self.mask) | (v << self.bit)
 
 
 @dataclass(frozen=True)
@@ -118,13 +136,13 @@ class ArchSpec:
         return None
 
     def decode_flags(self, value: int) -> Dict[str, int]:
-        return {f.name: (value >> f.bit) & 1 for f in self.flags}
+        return {f.name: f.get(value) for f in self.flags}
 
-    def set_flag(self, value: int, name: str, on: bool) -> int:
+    def set_flag(self, value: int, name: str, on) -> int:
         f = self.flag(name)
         if f is None:
             raise KeyError(name)
-        return (value | (1 << f.bit)) if on else (value & ~(1 << f.bit))
+        return f.set(value, int(on))
 
     def field(self, name: str) -> Optional[Field]:
         lname = name.lower()
@@ -150,7 +168,12 @@ _A64_FLAG_BITS = {'NG': 31, 'ZR': 30, 'CY': 29, 'OV': 28}
 
 
 def _flags(bits: Dict[str, int], source: str) -> Tuple[Flag, ...]:
-    return tuple(Flag(n, source, b) for n, b in bits.items())
+    """`{name: bit}` or `{name: (bit, width)}`."""
+    out = []
+    for name, spec in bits.items():
+        bit, width = spec if isinstance(spec, tuple) else (spec, 1)
+        out.append(Flag(name, source, bit, width))
+    return tuple(out)
 
 
 _ARM_MODES = {0x10: 'USR', 0x11: 'FIQ', 0x12: 'IRQ', 0x13: 'SVC', 0x16: 'MON', 0x17: 'ABT',
@@ -281,13 +304,14 @@ def _riscv(bits: int) -> ArchSpec:
 # Unicorn 2.1.4 only builds big-endian PowerPC; UC_MODE_LITTLE_ENDIAN is
 # rejected with UC_ERR_MODE, so the PowerPC:LE:* languages get no entry.
 # Ghidra's one-byte XER flag registers are ppc_common.sinc:41. xer_count (the
-# 7-bit string-transfer byte count) is one of them but is not a single bit, so
-# it is a Field only; likewise cr0..cr7 are 4-bit condition fields, which
+# 7-bit string-transfer byte count) is one of them and is carried as a wide
+# flag, since it still fits the byte Ghidra keeps it in; cr0..cr7 are 4-bit
+# condition fields, which
 # Unicorn exposes as their own registers, so they are listed as registers.
 # OV32/CA32 are ISA 3.0 (64-bit) additions; the bits are reserved and read as
 # zero on 32-bit, but Ghidra defines the flag registers for both languages.
 _PPC_FLAG_BITS = {'xer_so': 31, 'xer_ov': 30, 'xer_ov32': 19,
-                  'xer_ca': 29, 'xer_ca32': 18}
+                  'xer_ca': 29, 'xer_ca32': 18, 'xer_count': (0, 7)}
 _PPC_FIELDS = (Field('SO', 31), Field('OV', 30), Field('CA', 29),
                Field('OV32', 19), Field('CA32', 18), Field('BC', 0, 7))
 
@@ -315,9 +339,10 @@ def _ppc(bits: int) -> ArchSpec:
 # Ghidra calls A7 "SP" (68000.sinc:12) and defines the SR flag registers at
 # 68000.sinc:15; the packflags macro (68000.sinc:812) pins their bit
 # positions: SR = (TF<<15)|(SVF<<13)|(IPL<<8)|(XF<<4)|(NF<<3)|(ZF<<2)|(VF<<1)|CF.
-# IPL is one of those flag registers but holds 3 bits, so it is a Field only.
+# IPL is one of those flag registers and holds 3 bits, carried as a wide flag.
 # Unicorn 2.1.4 only builds big-endian m68k.
-_M68K_FLAG_BITS = {'TF': 15, 'SVF': 13, 'XF': 4, 'NF': 3, 'ZF': 2, 'VF': 1, 'CF': 0}
+_M68K_FLAG_BITS = {'TF': 15, 'SVF': 13, 'IPL': (8, 3),
+                   'XF': 4, 'NF': 3, 'ZF': 2, 'VF': 1, 'CF': 0}
 _M68K_FIELDS = (Field('T', 14, 2), Field('S', 13), Field('M', 12), Field('IPL', 8, 3),
                 Field('X', 4), Field('N', 3), Field('Z', 2), Field('V', 1), Field('C', 0))
 

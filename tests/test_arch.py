@@ -115,11 +115,17 @@ def test_ppc_xer_flags_and_fields():
         assert s.status == 'XER' and s.sp == 'r1'
         assert s.has_reg('cr0') and s.reg('cr0').size == 1
         assert s.reg('XER').size == s.ptr_size
-        # SO|OV|CA (31..29), OV32|CA32 (19,18) and a byte count of 0x7f
+        # SO|OV|CA (31..29), OV32|CA32 (19,18) and a byte count of 0x7f.
+        # xer_count is a Ghidra flag register seven bits wide.
         assert s.decode_flags(0xE00C007F) == {'xer_so': 1, 'xer_ov': 1, 'xer_ca': 1,
-                                              'xer_ov32': 1, 'xer_ca32': 1}
+                                              'xer_ov32': 1, 'xer_ca32': 1,
+                                              'xer_count': 0x7f}
         assert s.decode_flags(0) == {'xer_so': 0, 'xer_ov': 0, 'xer_ca': 0,
-                                     'xer_ov32': 0, 'xer_ca32': 0}
+                                     'xer_ov32': 0, 'xer_ca32': 0, 'xer_count': 0}
+        assert s.flag('xer_count').width == 7
+        assert s.set_flag(0, 'xer_count', 0x2a) == 0x2a
+        with pytest.raises(ValueError):
+            s.set_flag(0, 'xer_count', 0x80)
         assert s.set_flag(0, 'xer_ca', True) == 1 << 29
         assert s.set_flag(0xE0000000, 'xer_so', False) == 0x60000000
         assert s.field('BC').get(0xE00C007F) == 0x7f
@@ -132,12 +138,13 @@ def test_m68k_sr_flags_and_fields():
     assert s.status == 'SR' and s.reg('SR').size == 2
     assert s.pc == 'PC' and s.sp == 'SP'
     # SR = (TF<<15)|(SVF<<13)|(IPL<<8)|(XF<<4)|(NF<<3)|(ZF<<2)|(VF<<1)|CF
-    assert s.decode_flags(0x2715) == {'TF': 0, 'SVF': 1, 'XF': 1, 'NF': 0,
-                                      'ZF': 1, 'VF': 0, 'CF': 1}
+    assert s.decode_flags(0x2715) == {'TF': 0, 'SVF': 1, 'IPL': 7, 'XF': 1,
+                                      'NF': 0, 'ZF': 1, 'VF': 0, 'CF': 1}
     assert s.set_flag(0x2715, 'TF', True) == 0xA715
     assert s.set_flag(0x2715, 'CF', False) == 0x2714
-    # IPL is a Ghidra flag register but three bits wide, so it is a Field only
-    assert s.flag('IPL') is None
+    # IPL is a Ghidra flag register three bits wide, carried as a wide flag.
+    assert s.flag('IPL').width == 3
+    assert s.set_flag(0x2715, 'IPL', 2) == 0x2215
     assert s.field('IPL').get(0x2715) == 7
     assert s.field('IPL').mask == 0x700
     assert s.field('S').get(0x2715) == 1

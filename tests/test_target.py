@@ -202,3 +202,117 @@ def test_flag_registers_read_and_write():
     t.reg_write('CF', 1)
     t.reg_write('ZF', 0)
     assert t.reg_read('rflags') == 0x203
+
+
+def make_mips_delay_slot(end=0x1008):
+    """MIPS where the end address is a branch delay slot.
+
+        0x1000  addiu sp, sp, -0x18
+        0x1004  jr ra
+        0x1008  addiu sp, sp, 0x18     <- delay slot, and the end address
+    """
+    from unicorn import UC_MODE_MIPS32, UC_MODE_BIG_ENDIAN
+    from unicorn import mips_const as mips
+    uc = Uc(UC_ARCH_MIPS, UC_MODE_MIPS32 | UC_MODE_BIG_ENDIAN)
+    uc.mem_map(0x1000, 0x1000)
+    uc.mem_map(0x8000, 0x1000)
+    uc.mem_write(0x1000, bytes.fromhex('27bdffe8' '03e00008' '27bd0018'))
+    uc.reg_write(mips.UC_MIPS_REG_PC, 0x1000)
+    uc.reg_write(mips.UC_MIPS_REG_SP, 0x8800)
+    uc.reg_write(mips.UC_MIPS_REG_RA, 0x100c)
+    return UnicornTarget(uc, end=end)
+
+
+def test_stepping_past_a_delay_slot_end_makes_progress():
+    """Regression: stepping toward an end address that is a branch delay slot
+    used to re-execute the branch forever, applying its stack adjustment every
+    time while the program counter stood still.
+
+    Unicorn runs a branch and its delay slot as one step, so the end cannot be
+    stopped on exactly here; what matters is that every step advances and the
+    epilogue is applied once, not once per step."""
+    t = make_mips_delay_slot()
+    seen = []
+    for _ in range(6):
+        before, sp_before = t.pc(), t.sp()
+        t.step()
+        seen.append((hex(before), hex(t.pc())))
+        assert t.pc() != before or t.terminated, (
+            f'no progress at {before:#x}: sp {sp_before:#x} -> {t.sp():#x}')
+        if t.terminated:
+            break
+    # The prologue subtracted 0x18 and the delay slot added it back, once each.
+    assert t.sp() == 0x8800, (hex(t.sp()), seen)
+
+
+def test_running_to_a_delay_slot_end_still_terminates():
+    t = make_mips_delay_slot()
+    ev = t.run()
+    assert ev.terminated and t.terminated, ev
+
+
+def test_stepping_onto_an_exit_address_terminates():
+    """Arriving at an exit is terminal even when the step budget runs out on
+    the very same instruction; the budget must not mask it."""
+    t = make_x64()
+    t.exits.add(0x100a)
+    assert t.step().reason == 'step' and t.pc() == 0x1007
+    ev = t.step()
+    assert ev.reason == 'exit' and ev.pc == 0x100a, ev
+    assert t.terminated
+
+
+def test_fault_carries_the_refused_access():
+    """A UcError has only an error number; the stop event should still say
+    which access Unicorn refused."""
+    uc = Uc(UC_ARCH_X86, UC_MODE_64)
+    uc.mem_map(CODE, 0x1000)
+    uc.mem_write(CODE, bytes.fromhex('488b042500900000'))     # mov rax,[0x9000]
+    uc.reg_write(arch.x86.UC_X86_REG_RIP, CODE)
+    ev = UnicornTarget(uc).run()
+    assert ev.reason == 'error'
+    assert ev.fault_address == 0x9000
+    assert ev.fault_access == 'UC_MEM_READ_UNMAPPED'
+    assert ev.fault_size == 8
+    assert 'touching 0x9000' in ev.description
+
+
+def test_a_stop_forced_from_outside_is_not_called_termination():
+    """Regression: an unrelated hook calling emu_stop, while an end address was
+    declared, used to be reported as having reached the end."""
+    from unicorn import UC_HOOK_CODE
+    t = make_x64(end=0x1025)
+
+    def meddle(uc, address, size, user_data):
+        if address == 0x100a:
+            uc.emu_stop()
+    t.uc.hook_add(UC_HOOK_CODE, meddle)
+
+    ev = t.run()
+    assert ev.reason == 'stopped', ev
+    assert not ev.terminated and not t.terminated
+    assert t.pc() == 0x100a
+
+
+def test_a_delay_slot_short_stop_still_counts_as_arriving():
+    """The other side of that coin: stopping one instruction short of the end
+    because it is a delay slot is still arriving."""
+    t = make_mips_delay_slot()
+    ev = t.run()
+    assert ev.terminated and 'Reached 0x1008' in ev.description, ev
+
+
+def test_wide_flag_registers_read_and_write():
+    """m68k's interrupt level is three bits, and Ghidra models it as its own
+    register, so it must be readable and writable like any other flag."""
+    from unicorn import UC_ARCH_M68K, UC_MODE_BIG_ENDIAN
+    from unicorn import m68k_const as m68k
+    uc = Uc(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN)
+    t = UnicornTarget(uc)
+    t.reg_write('SR', 0x2715)
+    assert t.reg_read('IPL') == 7 and t.reg_read('ZF') == 1
+    t.reg_write('IPL', 2)
+    assert t.reg_read('IPL') == 2 and t.reg_read('SR') == 0x2215
+    assert t.flags()['IPL'] == 2
+    with pytest.raises(ValueError):
+        t.reg_write('IPL', 9)
