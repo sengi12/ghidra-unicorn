@@ -426,3 +426,66 @@ def test_real_mips_sample_inputs_all_run_clean():
         assert r.pc == 0x00100000 + 0xf0      # the delay slot of main's return
         assert r.instructions < 100
         assert r.registers['sp'] == 0x00210000   # main restored the frame
+
+
+# ---------------------------------------------------------------------------
+# tools/import_triage.py, the half that needs no Ghidra
+
+def _import_tool():
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, 'tools', 'import_triage.py')
+    spec = importlib.util.spec_from_file_location('import_triage', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_import_triage_plans_one_annotation_per_crash_address(tmp_path, capsys, crash_inputs):
+    tool = _import_tool()
+    h = write(tmp_path, 'crash.py', CRASH)
+    out_json = tmp_path / 'report.json'
+    triage.main(['--harness', h, '--inputs'] + crash_inputs
+                + ['--quiet', '--json', str(out_json)])
+    capsys.readouterr()
+
+    doc = tool.load_report(str(out_json))
+    plan = tool.plan_annotations(doc)
+    assert [address for address, _, _, _ in plan] == [0x1000, 0x1010]
+    assert plan[0][1] == 2 and plan[0][2] == 'crash'
+    text = plan[0][3]
+    assert tool.TAG in text
+    assert 'UC_ERR_READ_UNMAPPED' in text and '0x9000' in text
+    assert 'replay: a.bin' in text
+
+    # An offset shifts emulated addresses onto the program's image base.
+    assert [a for a, _, _, _ in tool.plan_annotations(doc, offset=0x400000)] \
+        == [0x401000, 0x401010]
+
+    # Re-running replaces the previous run's lines and keeps anyone else's.
+    assert tool.strip_tagged('mine\n' + text) == 'mine'
+
+    assert tool.main(['--json', str(out_json), '--dry-run']) == 0
+    printed = capsys.readouterr().out
+    assert '0x00001000  [2 crash]' in printed and tool.TAG in printed
+
+
+def test_import_triage_skips_non_crashes_unless_asked(tmp_path, capsys):
+    tool = _import_tool()
+    h = write(tmp_path, 'clean.py', CLEAN)
+    inp = write_input(tmp_path, 'in.bin', b'abcd')
+    out_json = tmp_path / 'report.json'
+    triage.main(['--harness', h, '--inputs', inp, '--quiet', '--json', str(out_json)])
+    capsys.readouterr()
+
+    doc = tool.load_report(str(out_json))
+    assert tool.plan_annotations(doc) == []
+    assert len(tool.plan_annotations(doc, crashes_only=False)) == 1
+
+
+def test_import_triage_rejects_a_file_that_is_not_a_report(tmp_path):
+    tool = _import_tool()
+    p = tmp_path / 'other.json'
+    p.write_text('{"hello": 1}')
+    with pytest.raises(SystemExit):
+        tool.load_report(str(p))
