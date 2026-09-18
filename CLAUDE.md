@@ -53,7 +53,14 @@ $PY -m ghidraunicorn.triage --harness examples/afl_unicorn_simple.py \
 
 `tools/setup_project.py` rebuilds the Ghidra project, and
 `tools/export_symbols.py` writes the symbol JSON the `--symbols` option
-takes.
+takes. `tools/differential.py` runs a harness under both Unicorn and
+Ghidra's p-code emulator and reports the first instruction they disagree
+about; it needs a Ghidra installation.
+
+`.github/workflows/tests.yml` runs the unit tests on 3.9 and 3.12 and then
+drives the connector headlessly on the example harness - run, record,
+replay, reverse, and a deliberate failure that must fail the build. Nothing
+Ghidra-shaped is in CI; that is what `e2e_ghidra.py` is for, by hand.
 
 ## Design rules, worth keeping
 

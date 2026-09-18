@@ -619,6 +619,14 @@ Debugger tool, launches the *unicorn* offer through the real launcher script
 and checks the trace Ghidra built: registers, preloaded bytes, module, then
 step, step-over, breakpoint, resume, register write, and run-to-end.
 
+`.github/workflows/tests.yml` runs the unit tests on the oldest and a current
+Python, and then uses the connector on itself: the example harness is run to
+completion headlessly, its recording is replayed, reverse execution is taken
+over the end of the programme and back, and a deliberately failing assertion
+has to fail the build. The Ghidra half is not there, because it needs an
+installation and a display; `tools/e2e_ghidra.py` stays a thing to run by
+hand.
+
 ## Where the pretty output lives
 
 Ghidra's Debugger already has the windows a gef/pwndbg context is made of,
