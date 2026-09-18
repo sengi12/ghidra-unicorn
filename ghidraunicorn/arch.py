@@ -507,6 +507,22 @@ def spec_for_key(key: str) -> ArchSpec:
     return SPECS[k]
 
 
+def spec_for_language(language: str) -> ArchSpec:
+    """The table entry for a Ghidra language id, e.g. 'MIPS:BE:32:default'.
+
+    The other direction of the mapping every entry already carries, for the
+    places that start from Ghidra rather than from Unicorn - the context
+    panel reads the language off a trace and needs the register names and
+    the decoder that go with it.
+    """
+    wanted = language.strip().lower()
+    for spec in SPECS.values():
+        if spec.language.lower() == wanted:
+            return spec
+    raise KeyError(f"No table entry for Ghidra language '{language}'. Known: "
+                   + ', '.join(sorted(s.language for s in SPECS.values())))
+
+
 def spec_for_uc(uc) -> ArchSpec:
     """Pick the spec matching a live Uc instance's arch and mode."""
     arch = uc.ctl_get_arch() if hasattr(uc, 'ctl_get_arch') else uc._arch

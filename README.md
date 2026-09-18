@@ -340,6 +340,17 @@ stops reproducing.
 `--commands-file` reads the same thing from a file. Commands split on
 newlines and semicolons, quotes are respected, and `#` starts a comment.
 
+## A context panel in Ghidra
+
+`ghidra_scripts/UnicornContextPanel.py` puts the same view the console
+prints into a docking window beside the Listing: registers with pointers
+dereferenced, the decoded status register, disassembly and the stack. Add
+this repository's `ghidra_scripts` directory in the Script Manager and run
+it. It draws from the trace, so it follows the Time window: scrub back and
+the panel shows that point in history.
+
+Not yet run against a real Ghidra - see [CHANGELOG.md](CHANGELOG.md).
+
 ## Checking one emulator against the other
 
 Unicorn and Ghidra's p-code emulator implement the same instruction sets
@@ -619,24 +630,29 @@ change on this side: everything it would show is already in the trace.
 ## What is planned
 
 [TODO.md](TODO.md) is the roadmap and [CHANGELOG.md](CHANGELOG.md) records
-what has shipped. The short version of what is coming: reverse execution, so
-Ghidra's step-back buttons work; batch crash triage over an afl-unicorn
-crashes directory; more processors and a Windows launcher; symbols and
-syscall stubs; and a coverage handoff to ghidra-aflcov.
+what has shipped. Everything on the roadmap is now written, and there are no
+known bugs outstanding. Two items - the context panel and the p-code side of
+the differential runner - were written without a Ghidra installation to try
+them against, and are marked as such until someone runs them once.
 
 ## Limitations and ideas
 
 - One thread, one frame. Ghidra unwinds the stack itself from registers and
   memory when it has a mapped program with function information.
 - Step-over needs Capstone to recognise calls; without it, it steps into.
-- Thumb harnesses get the `ARM:LE:32:v8T` language. Mixed ARM/Thumb code
-  would need context-register tracking.
+- The operating system under the emulator is a small one: the calls a
+  harness usually needs, and ENOSYS for the rest, which `sys` shows rather
+  than hiding. There is deliberately no host filesystem behind `open`.
+- A stubbed function is one step, not a step into: the stub stands in for
+  the whole call. A breakpoint on it still stops before it.
 - Going backwards is bounded by what is kept: checkpoints are dropped oldest
   first once they exceed the memory budget, and the connector says how far
   back it can still reach rather than guessing.
-- Reverse-continue finds execute breakpoints, not watchpoint hits.
-- [TODO.md](TODO.md) has the rest of the roadmap, including syscall stubs and
-  a context panel inside Ghidra.
+- A register watchpoint is a comparison made once per instruction, because
+  Unicorn has no hook for one, and it is not published to Ghidra: the
+  trace's breakpoint kinds are all about addresses.
+- SPARC and TriCore have calling conventions but no system call table, and
+  Unicorn 2.1.4 cannot map memory for TriCore at all.
 
 ## License
 

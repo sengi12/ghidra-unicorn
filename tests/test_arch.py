@@ -193,3 +193,25 @@ def test_capstone_pairs_decode_calls(key, code, mnemonic, size):
     _, isize, mnem, _ = insns[0]
     assert mnem == mnemonic and isize == size
     assert mnem in spec.call_mnemonics
+
+
+def test_a_spec_can_be_found_from_a_ghidra_language():
+    """The context panel starts from a trace, so it needs this direction."""
+    assert arch.spec_for_language('MIPS:BE:32:default').key == 'mips'
+    assert arch.spec_for_language('x86:LE:64:default').key == 'x64'
+    assert arch.spec_for_language('ARM:LE:32:v8T').key == 'armlethumb'
+
+
+def test_the_language_lookup_ignores_case():
+    assert arch.spec_for_language('x86:le:64:DEFAULT').key == 'x64'
+
+
+def test_an_unknown_language_says_what_is_known():
+    with pytest.raises(KeyError) as e:
+        arch.spec_for_language('Toaster:BE:8:default')
+    assert 'MIPS:BE:32:default' in str(e.value)
+
+
+def test_every_spec_can_be_found_by_its_own_language():
+    for key, spec in arch.SPECS.items():
+        assert arch.spec_for_language(spec.language).language == spec.language

@@ -4,12 +4,33 @@ Sections: the stop reason, registers (changed ones highlighted, pointers
 annotated), decoded flags, disassembly around PC (Capstone), and the stack.
 Colour is on when stdout is a terminal and NO_COLOR is unset. Ghidra's
 terminal understands ANSI, so this looks the same there as in a shell.
+
+What it renders from
+--------------------
+A `UnicornTarget`, usually - but only through the handful of things listed
+below, and nothing else. That is deliberate: the same view is wanted inside
+Ghidra, drawn from the trace rather than from the emulator, and the trace
+already holds everything it needs. Anything that provides these can be
+rendered:
+
+    pc()                     -> int
+    sp()                     -> int
+    regs()                   -> {name: value}
+    reg_read(name)           -> int          (also `cpsr.M`-style names)
+    read(address, size)      -> bytes
+    regions()                -> [(start, end_inclusive, perms)]
+    decode(address)          -> (size, mnemonic, operands) or None
+    fields()                 -> [(name, label)] of the status register
+    breakpoints              -> {num: object with .address, .kind, .enabled}
+    spec                     -> an `arch.ArchSpec`
+
+`ghidra_scripts/UnicornContextPanel.py` is the other implementation, over a
+Ghidra trace. Keep this list short: every addition to it is another thing
+that has to exist on both sides.
 """
 import os
 import sys
 from typing import Dict, List, Optional, TextIO, Tuple
-
-from unicorn import UcError
 
 from .target import EXECUTE, StopEvent, UnicornTarget
 
@@ -81,7 +102,10 @@ class Context:
             return ''
         try:
             raw = self.target.read(v, min(self.target.spec.ptr_size, 8))
-        except UcError:
+        except Exception:
+            # Not "except UcError": reading off the end of what is mapped is
+            # an ordinary event here, and what it raises depends on who is
+            # being rendered. A trace says so differently from an emulator.
             return ''
         word = int.from_bytes(raw, 'little' if self.target.spec.endian == 'little' else 'big')
         printable = all(32 <= b < 127 for b in raw)
@@ -161,7 +185,7 @@ class Context:
             size, mnem, ops = insn
             try:
                 raw = t.read(addr, size).hex()
-            except UcError:
+            except Exception:
                 raw = ''
             marker = ' → ' if addr == pc else ('●  ' if addr in bps else '   ')
             text = f'{marker}{addr:#x}{self._symbol(addr)}  {raw:<16} {mnem:<8} {ops}'
@@ -185,7 +209,7 @@ class Context:
             a = sp + i * ps
             try:
                 raw = t.read(a, ps)
-            except UcError:
+            except Exception:
                 lines.append(f'{a:#x}│+{i * ps:#05x}: {self.p.dim("(unmapped)")}')
                 break
             v = int.from_bytes(raw, 'little' if t.spec.endian == 'little' else 'big')

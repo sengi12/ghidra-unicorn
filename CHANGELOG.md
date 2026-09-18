@@ -9,6 +9,24 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **A context panel inside Ghidra**, as
+  `ghidra_scripts/UnicornContextPanel.py`: a docking window drawing the same
+  gef-style view the console prints - registers with pointers dereferenced,
+  the decoded status register, disassembly and the stack - beside the
+  Listing instead of in a terminal. It follows the current trace and
+  snapshot, so scrubbing the Time window redraws it at that point in
+  history.
+
+  It needed nothing new from the connector, only that `context.py` be honest
+  about what it renders from. That surface is now written down - ten things,
+  no more - and the panel is the second implementation of it, over a Ghidra
+  trace. A test renders the same state through both a `UnicornTarget` and a
+  plain object providing only that surface and requires the two pictures to
+  be identical, which is what keeps the two from drifting. The one real
+  coupling it flushed out is fixed: the renderer caught Unicorn's own
+  exception when a read ran off the end of a mapping, which nothing but
+  Unicorn could have raised. **Not yet run against a real Ghidra.**
+
 - **Differential execution against Ghidra's p-code emulator**, in
   `differential.py`: both engines are put in the same state, stepped in
   lockstep, and compared after every instruction, with the first

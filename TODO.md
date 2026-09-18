@@ -9,11 +9,14 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 These two need a running Ghidra to build against, so they are last.
 
-- [ ] **A context panel inside Ghidra.** A docking `ComponentProvider` in a
-  Ghidra script, in the style of ghidra-hexEditor and ghidra-aflcov, showing
-  the gef-style register, pointer-chain and stack view in a window instead of
-  the terminal. It needs nothing new on the Python side: everything it would
-  draw is already in the trace.
+- [~] **A context panel inside Ghidra.** Written as
+  `ghidra_scripts/UnicornContextPanel.py`: a docking `ComponentProvider`
+  drawing the same view the console prints, from the trace rather than from
+  the emulator. As the item said, it needed nothing new on the Python side -
+  only that `context.py` render from a small surface instead of from the
+  target, which it now documents and which a test pins down by rendering
+  both ways and comparing. Not yet run against a real Ghidra; the Swing and
+  trace API calls want checking on a machine with one.
 - [~] **Differential execution against Ghidra's p-code emulator.** The
   comparison is written and tested (`differential.py`, Unicorn against
   Unicorn, with deliberate divergences so the machinery is shown to be able

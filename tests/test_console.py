@@ -211,3 +211,70 @@ def test_console_refuses_a_half_given_stub():
     stubs.install(t)
     c.push('stub malloc')
     assert 'usage: stub NAME ADDR' in out.getvalue()
+
+
+# ---- the context renders from anything with the target's surface ----------
+
+class FakeSource:
+    """Everything `Context` needs, and nothing that is a UnicornTarget.
+
+    The panel inside Ghidra draws the same view from a trace, so this is the
+    check that the renderer really is separable from the emulator rather
+    than only looking as though it is.
+    """
+
+    def __init__(self, target):
+        self.spec = target.spec
+        self.breakpoints = {}
+        self._regs = dict(target.regs())
+        self._memory = {start: target.read(start, end - start + 1)
+                        for start, end, _ in target.regions()}
+        self._regions = target.regions()
+        self._decode = target.decode
+
+    def pc(self):
+        return self._regs[self.spec.pc]
+
+    def sp(self):
+        return self._regs[self.spec.sp]
+
+    def regs(self):
+        return dict(self._regs)
+
+    def reg_read(self, name):
+        return self._regs[self.spec.reg(name).name]
+
+    def regions(self):
+        return list(self._regions)
+
+    def read(self, address, size):
+        for start, data in self._memory.items():
+            if start <= address and address + size <= start + len(data):
+                return data[address - start:address - start + size]
+        raise ValueError(f'{address:#x} is not mapped')
+
+    def decode(self, address):
+        return self._decode(address)
+
+    def fields(self):
+        if self.spec.status is None:
+            return []
+        return self.spec.decode_fields(self._regs[self.spec.status])
+
+
+def test_the_context_renders_from_something_that_is_not_a_target():
+    t = make_x64()
+    t.step(3)
+    text = Context(FakeSource(t), io.StringIO(), color=False).render()
+    assert '[ registers ]' in text and '[ disassembly ]' in text
+    assert 'RAX' in text and '0x0000000000000003' in text
+    assert 'mov' in text
+
+
+def test_the_two_renderings_agree():
+    """Same state, same picture, whichever side it came from."""
+    t = make_x64()
+    t.step(3)
+    direct = Context(t, io.StringIO(), color=False).render()
+    indirect = Context(FakeSource(t), io.StringIO(), color=False).render()
+    assert direct == indirect
