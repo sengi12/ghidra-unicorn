@@ -108,6 +108,19 @@ class Breakpoint:
 
 
 @dataclass(frozen=True)
+class Hit:
+    """One breakpoint firing, at the instruction the stop belongs to.
+
+    A hit count means "how many times has this fired at or before where we
+    are now", so going back past a hit has to undo it, and an ignore count
+    the hit consumed has to come back with it.
+    """
+    icount: int
+    num: int
+    ignored: bool = False
+
+
+@dataclass(frozen=True)
 class StopEvent:
     reason: str          # 'breakpoint' | 'watchpoint' | 'step' | 'interrupt' | 'exit' | 'error' | 'stopped'
     pc: int
@@ -166,6 +179,12 @@ class UnicornTarget:
         #: again. They are rewound and pruned with the history; see
         #: effects.py.
         self.effect_logs: List['EffectLog'] = []
+        #: Every breakpoint hit so far, newest last, as far back as the
+        #: history reaches. Reverse execution undoes them from the end.
+        self._hits: List[Hit] = []
+        #: While a search replays history, where watchpoints would have
+        #: fired. None outside one, which is when they may actually stop.
+        self._observed: Optional[List[Tuple[int, Breakpoint, Dict]]] = None
         #: Set by `syscalls.install`; None means traps are left to Unicorn.
         self.syscalls = None
         #: Set by `stubs.install`; None means no function is stood in for.
@@ -398,10 +417,16 @@ class UnicornTarget:
         if not self._passes(bp, extra):
             return False
         bp.hit_count += 1
-        if bp.ignore_count > 0:
+        ignored = bp.ignore_count > 0
+        if ignored:
             bp.ignore_count -= 1
-            return False
-        return True
+        # Recorded at the instruction the *stop* belongs to, which is where
+        # the machine would be left: for an execute breakpoint the one about
+        # to run, and for a watchpoint the one after the access, since the
+        # accessing instruction has already been counted by the time its
+        # memory hook runs.
+        self._hits.append(Hit(self.icount, bp.num, ignored))
+        return not ignored
 
     def delete_breakpoint(self, num: int) -> None:
         bp = self.breakpoints.pop(num)
@@ -477,6 +502,30 @@ class UnicornTarget:
         """The history no longer reaches back as far as it did."""
         for log in self.effect_logs:
             log.forget_before(earliest)
+        # A hit that can no longer be reached can no longer be undone, so
+        # only the record goes; the count it contributed stays, because the
+        # count is cumulative and that hit really did happen.
+        while self._hits and self._hits[0].icount < earliest:
+            self._hits.pop(0)
+
+    def _undo_hits(self, k: int) -> None:
+        """Un-fire every hit that happens after instruction `k`.
+
+        A hit recorded *at* k survives: being stopped at a breakpoint is the
+        state in which it has fired.
+        """
+        while self._hits and self._hits[-1].icount > k:
+            hit = self._hits.pop()
+            bp = self.breakpoints.get(hit.num)
+            if bp is None:
+                continue
+            bp.hit_count = max(bp.hit_count - 1, 0)
+            if hit.ignored:
+                bp.ignore_count += 1
+
+    def hits_at(self, icount: int, num: int) -> bool:
+        """Whether breakpoint `num` is already recorded as firing at `icount`."""
+        return any(h.icount == icount and h.num == num for h in self._hits)
 
     def _on_invalid(self, uc, access, address, size, value, user_data) -> bool:
         """Remember the access Unicorn is about to refuse.
@@ -494,6 +543,14 @@ class UnicornTarget:
 
     def _on_mem(self, uc, access, address, size, value, bp: Breakpoint) -> bool:
         if self._replaying:
+            # A replay is silent, but a backward search needs to know where a
+            # watchpoint *would* have fired, and this hook is the only thing
+            # that sees it. Note it and carry on; nothing stops.
+            if self._observed is not None and bp.enabled:
+                what = 'write' if access == UC_MEM_WRITE else 'read'
+                self._observed.append((self.executing_icount, bp,
+                                       {'address': address, 'size': size,
+                                        'value': value, 'access': what}))
             return True
         if not bp.enabled or self._stop is not None or self._pending is not None:
             return True
@@ -791,6 +848,7 @@ class UnicornTarget:
         # back the state those layers had before it.
         for log in self.effect_logs:
             log.truncate(k)
+        self._undo_hits(k)
 
     def _history_pcs(self, lo: int, hi: int) -> Dict[int, int]:
         """The PC at each instruction in [lo, hi], by replaying from the
@@ -801,28 +859,30 @@ class UnicornTarget:
         self._replay_forward(hi - cp.icount + 1, trace)
         return {cp.icount + i: pc for i, pc in enumerate(trace)}
 
-    def _depths(self, pcs: List[int]) -> List[int]:
-        """Call depth at each of a run of consecutive PCs, relative to the
-        first. A call pushes its return address; arriving at that address pops
-        it. Needs Capstone; without it everything stays at depth 0, which makes
-        a reverse step-over a plain reverse step."""
-        depth, out, stack = 0, [], []
-        calls = self.spec.call_mnemonics
-        sizes: Dict[int, Optional[int]] = {}       # a loop decodes once
-        for pc in pcs:
-            while stack and pc == stack[-1]:
-                stack.pop()
-                depth -= 1
-            out.append(depth)
-            if pc not in sizes:
-                insn = self.decode(pc)
-                sizes[pc] = (pc + insn[0]) if (insn is not None
-                                               and insn[1] in calls) else None
-            ret = sizes[pc]
-            if ret is not None:
-                stack.append(ret)
-                depth += 1
-        return out
+    def _depth_delta(self, pc: int, cache: Dict[int, int]) -> int:
+        """How the call depth changes going one instruction *further back*.
+
+        Moving from instruction j+1 back to j: if j is a call then j+1 was
+        one frame deeper, so going back to j is one frame shallower (-1);
+        if j returns then j+1 was one frame shallower, so going back is one
+        deeper (+1); anything else leaves it alone.
+
+        Without Capstone nothing is recognised and everything comes back
+        zero, which turns a reverse step-over into a plain reverse step -
+        the same thing that happens to the forward step-over.
+        """
+        if pc in cache:
+            return cache[pc]
+        delta = 0
+        insn = self.decode(pc)
+        if insn is not None:
+            _, mnemonic, operands = insn
+            if self.spec.is_call(mnemonic, operands):
+                delta = -1
+            elif self.spec.is_return(mnemonic, operands):
+                delta = +1
+        cache[pc] = delta
+        return delta
 
     def goto_icount(self, k: int) -> StopEvent:
         """Restore the state the target had at instruction `k`."""
@@ -860,54 +920,143 @@ class UnicornTarget:
         """The instruction a reverse step-over lands on: the most recent one
         before now that ran at the current call depth or shallower.
 
-        Call depth is only meaningful against a fixed starting point, so this
-        replays the whole retained history once and is O(instructions kept).
-        A window starting mid-call would count a `ret` out of a frame it never
-        saw entered as depth 0 and land inside the callee.
+        Depth is kept *relative to where we are now*, which is what makes
+        this local: a call met on the way back makes the relative depth one
+        shallower and a return makes it one deeper, and nothing else moves
+        it, so no absolute depth and no stack of return addresses is needed.
+        The search therefore walks back only as far as it actually travels,
+        one checkpoint window at a time.
+
+        It used to replay the whole retained history first, to establish an
+        absolute depth it could trust, which cost time proportional to how
+        much history was being kept rather than to the distance travelled.
         """
         cur = self.icount
-        cur_pc = self.pc()
         earliest = self.timeline.earliest
-        pcs = self._history_pcs(earliest, cur - 1)
-        seq = [pcs[i] for i in range(earliest, cur)]
-        depths = self._depths(seq + [cur_pc])
-        here = depths[-1]
-        for idx in range(len(seq) - 1, -1, -1):
-            if depths[idx] <= here:
-                return earliest + idx
+        kinds: Dict[int, int] = {}       # pc -> delta, so a loop decodes once
+        rel = 0
+        hi = cur - 1
+        while hi >= earliest:
+            cp = self.timeline.checkpoint_at_or_before(hi)
+            pcs = self._history_pcs(cp.icount, hi)
+            for j in range(hi, cp.icount - 1, -1):
+                rel += self._depth_delta(pcs[j], kinds)
+                if rel <= 0:
+                    return j
+            hi = cp.icount - 1
         return earliest
 
     def resume_back(self) -> StopEvent:
-        """Run backwards to the most recent breakpoint hit before now, or to
-        the earliest instruction the history still holds."""
+        """Run backwards to the most recent hit before now.
+
+        "Hit" means the same thing it means going forwards: an enabled
+        execute breakpoint whose condition holds, or a watchpoint whose
+        access the history actually made. Watchpoints need the history
+        replayed with the memory hooks watched rather than merely muted,
+        because the access is the only evidence they ever happened - which
+        is why this used to find execute breakpoints and nothing else.
+
+        The machine is left exactly where a forward run would have stopped:
+        *on* an execute breakpoint's instruction, and *after* the
+        instruction a watchpoint's access belongs to.
+        """
         cur = self.icount
         self._require_reversible(cur - 1)
-        addrs = {b.address for b in self.breakpoints.values()
-                 if b.enabled and b.kind == EXECUTE}
+        live = [b for b in self.breakpoints.values() if b.enabled]
+        by_address = {b.address: b for b in live if b.kind == EXECUTE}
+        watched = [b for b in live if b.kind != EXECUTE]
         earliest = self.timeline.earliest
-        found: Optional[int] = None
+        found: Optional[Tuple[int, Breakpoint, Optional[Dict]]] = None
         with self._reversing():
             hi = cur - 1
-            while addrs and found is None and hi >= earliest:
+            while (by_address or watched) and found is None and hi >= earliest:
                 cp = self.timeline.checkpoint_at_or_before(hi)
-                pcs = self._history_pcs(cp.icount, hi)
-                for j in range(hi, cp.icount - 1, -1):
-                    if pcs[j] in addrs:
-                        found = j
-                        break
+                candidates = self._scan_back(cp.icount, hi, by_address, watched)
+                found = self._first_that_holds(candidates, cur)
                 hi = cp.icount - 1
-            self._go(earliest if found is None else found)
+            if found is None:
+                self._go(earliest)
+            else:
+                self._go(found[0])
+                self._recount(found)
+        pc = self.pc()
         if found is None:
-            pc = self.pc()
             return self._notify(StopEvent(
                 'stopped', pc, f'No earlier breakpoint; at the start of the '
                                f'history, instruction {earliest} ({pc:#x})'))
-        pc = self.pc()
-        bp = self._bp_by_addr.get(pc)
-        num = bp.num if bp is not None else 0
+        at, bp, extra = found
+        kind = 'Watchpoint' if bp.kind != EXECUTE else 'Breakpoint'
+        detail = ''
+        if extra is not None:
+            detail = (f': {extra["access"]} {extra["size"]} bytes at '
+                      f'{extra["address"]:#x}')
         return self._notify(StopEvent(
-            'breakpoint', pc,
-            f'Breakpoint {num} at {pc:#x} (backwards, instruction {found})', bp))
+            'watchpoint' if bp.kind != EXECUTE else 'breakpoint', pc,
+            f'{kind} {bp.num} at {pc:#x}{detail} (backwards, instruction {at})',
+            bp))
+
+    def _scan_back(self, lo: int, hi: int, by_address: Dict[int, Breakpoint],
+                   watched: List[Breakpoint]
+                   ) -> List[Tuple[int, Breakpoint, Optional[Dict]]]:
+        """Every place in [lo, hi] where a breakpoint would have fired.
+
+        One replay of the window finds both kinds at once: the program
+        counter trace gives the execute breakpoints, and the watched memory
+        hooks give the accesses. Ordered oldest first.
+        """
+        cp = self._restore_state(lo)
+        trace: List[int] = []
+        observed: List[Tuple[int, Breakpoint, Dict]] = []
+        self._observed = observed if watched else None
+        try:
+            self._replay_forward(hi - cp.icount + 1, trace)
+        finally:
+            self._observed = None
+        out: List[Tuple[int, Breakpoint, Optional[Dict]]] = []
+        for i, pc in enumerate(trace):
+            at = cp.icount + i
+            if at > hi:
+                break
+            bp = by_address.get(pc)
+            if bp is not None:
+                out.append((at, bp, None))
+        for at, bp, extra in observed:
+            # Forwards, a watchpoint stops *after* the accessing instruction
+            # completes, so that is where going back to it must land too.
+            out.append((at + 1, bp, extra))
+        out.sort(key=lambda c: c[0])
+        return out
+
+    def _first_that_holds(self, candidates, cur: int):
+        """The newest candidate before `cur` whose condition is satisfied.
+
+        A condition has to be tested in the state it would have seen, so the
+        machine is moved to the candidate before evaluating. Most breakpoints
+        have no condition and cost nothing here.
+        """
+        for at, bp, extra in reversed(candidates):
+            if at >= cur or at < self.timeline.earliest:
+                continue
+            if bp.condition is None:
+                return (at, bp, extra)
+            self._go(at)
+            if self._passes(bp, extra):
+                return (at, bp, extra)
+        return None
+
+    def _recount(self, found: Tuple[int, Breakpoint, Optional[Dict]]) -> None:
+        """Make the hit count agree with having arrived here backwards.
+
+        `_go` has already undone every hit after this point. If the history
+        records this one - the forward run really did fire it - there is
+        nothing to do. If it does not, the breakpoint was set after this
+        point was first passed, and arriving at it now is its first hit.
+        """
+        at, bp, _ = found
+        if not self.hits_at(at, bp.num):
+            bp.hit_count += 1
+            self._hits.append(Hit(at, bp.num))
+            self._hits.sort(key=lambda h: h.icount)
 
     # ---- decoding --------------------------------------------------------
 

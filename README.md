@@ -31,7 +31,9 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   checkpoint, and steps backwards by restoring the nearest checkpoint and
   replaying forward in silence. With gdb this needs rr; with an emulator it
   falls out of the design. `goto` jumps to any instruction number in the
-  recorded history.
+  recorded history. Reverse-continue finds watchpoint hits as well as
+  breakpoints, hit counts rewind along with the machine, and a reverse
+  step-over costs the distance it travels rather than the whole history.
 - **An operating system underneath**, so a harness no longer has to avoid
   every call that leaves the binary. System calls are serviced by a small
   Linux layer (`read`, `write`, `open`, `mmap`, `brk`, `exit` and friends)

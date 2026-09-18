@@ -63,6 +63,11 @@ takes.
   (`Ghidra/Processors/*/data/languages/*.ldefs` and the `define register`
   lines in the `.sinc` files). Do not write them from memory; several look
   obvious and are wrong.
+- **Call depth going backwards is relative, not absolute.** A reverse
+  step-over does not need to know how deep the stack is, only how the depth
+  changes as it walks back: a call is one frame shallower, a return is one
+  frame deeper. That is what lets it stop at a checkpoint window instead of
+  replaying everything retained. Do not reintroduce an absolute depth.
 - **Flags are Ghidra's own one-byte registers** carved out of a status
   register, so they appear as editable rows in the Registers window. Every
   other bit of that register is a `Field`, reachable as `cpsr.M`. A `Flag` may
@@ -169,11 +174,11 @@ Each of these has a regression test; do not undo them.
 
 ## Where to start
 
-[TODO.md](TODO.md) is ordered. The next item is the two remaining
-reverse-execution bugs: reverse-continue only looks for execute breakpoints
-and does not move hit counts as it passes them, and reverse step-over replays
-the whole retained history to work out call depth. After those, thumb
-tracking, batch mode and the console extras.
+[TODO.md](TODO.md) is ordered and there are no known bugs left. The next
+item is thumb tracking, then batch and headless mode, the console extras,
+session recording and region-aware preloading. The two items needing a
+running Ghidra - the context panel and differential execution against the
+p-code emulator - are last.
 
 `examples/syscalls_and_stubs.py` is the shortest way to see the system call
 and stub layers working: it reads, allocates, measures, prints and exits with

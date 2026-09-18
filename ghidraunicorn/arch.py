@@ -104,6 +104,14 @@ class ArchSpec:
     cs: Optional[Tuple[int, int]] = None
     #: Mnemonics that transfer control to a subroutine (for step-over).
     call_mnemonics: Tuple[str, ...] = ()
+    #: Mnemonics that return from one (for reverse step-over). An entry with
+    #: a space in it is matched against the operands as well, because
+    #: several architectures return through an ordinary instruction rather
+    #: than a dedicated one: ARM's `bx lr` is an indirect branch, `pop
+    #: {r4, pc}` is a load, and MIPS's `jr $ra` is a jump. Every spelling
+    #: here is what Capstone actually emits for that encoding, not what the
+    #: manual calls it.
+    return_mnemonics: Tuple[str, ...] = ()
     #: Extra register values Ghidra needs for correct disassembly context.
     context: Dict[str, int] = field(default_factory=dict)
     #: Ghidra's flag registers, derived from a status register.
@@ -127,6 +135,20 @@ class ArchSpec:
     def has_reg(self, name: str) -> bool:
         lname = name.lower()
         return any(r.name.lower() == lname for r in self.regs)
+
+    def is_call(self, mnemonic: str, operands: str = '') -> bool:
+        return mnemonic.lower() in self.call_mnemonics
+
+    def is_return(self, mnemonic: str, operands: str = '') -> bool:
+        mnemonic, operands = mnemonic.lower(), operands.lower()
+        for entry in self.return_mnemonics:
+            if ' ' in entry:
+                want_mnem, want_ops = entry.split(None, 1)
+                if mnemonic == want_mnem and want_ops in operands:
+                    return True
+            elif mnemonic == entry:
+                return True
+        return False
 
     def flag(self, name: str) -> Optional[Flag]:
         lname = name.lower()
@@ -159,6 +181,11 @@ class ArchSpec:
 def _regs(names: List[str], consts, size: int, prefix: str) -> List[Reg]:
     return [Reg(n, getattr(consts, f'{prefix}{n.upper()}'), size) for n in names]
 
+
+# What Capstone emits for each architecture's return encodings, checked
+# against a real disassembly rather than taken from the manuals.
+_X86_RETURNS = ('ret', 'retf', 'iret', 'iretd', 'iretq')
+_ARM_RETURNS = ('bx lr', 'pop pc', 'ldm pc', 'ldmia pc', 'mov pc, lr')
 
 _X86_FLAG_BITS = {'CF': 0, 'PF': 2, 'AF': 4, 'ZF': 6, 'SF': 7, 'TF': 8, 'IF': 9, 'DF': 10,
                   'OF': 11, 'NT': 14, 'RF': 16, 'VM': 17, 'AC': 18, 'VIF': 19, 'VIP': 20, 'ID': 21}
@@ -201,7 +228,7 @@ def _x86_64() -> ArchSpec:
     regs.append(Reg('GS_OFFSET', x86.UC_X86_REG_GS_BASE, 8))
     return ArchSpec('x64', UC_ARCH_X86, UC_MODE_64, 'x86:LE:64:default', 'gcc',
                     'little', 64, tuple(regs), 'RIP', 'RSP',
-                    cs=_cs('CS_ARCH_X86', 'CS_MODE_64'), call_mnemonics=('call',),
+                    cs=_cs('CS_ARCH_X86', 'CS_MODE_64'), call_mnemonics=('call',), return_mnemonics=_X86_RETURNS,
                     flags=_flags(_X86_FLAG_BITS, 'rflags'), status='rflags', fields=_X86_FIELDS)
 
 
@@ -212,7 +239,7 @@ def _x86_32() -> ArchSpec:
     regs += _regs(['CS', 'SS', 'DS', 'ES', 'FS', 'GS'], x86, 2, 'UC_X86_REG_')
     return ArchSpec('x86', UC_ARCH_X86, UC_MODE_32, 'x86:LE:32:default', 'gcc',
                     'little', 32, tuple(regs), 'EIP', 'ESP',
-                    cs=_cs('CS_ARCH_X86', 'CS_MODE_32'), call_mnemonics=('call',),
+                    cs=_cs('CS_ARCH_X86', 'CS_MODE_32'), call_mnemonics=('call',), return_mnemonics=_X86_RETURNS,
                     flags=_flags(_X86_FLAG_BITS, 'eflags'), status='eflags', fields=_X86_FIELDS)
 
 
@@ -228,7 +255,7 @@ def _arm64(big: bool) -> ArchSpec:
     return ArchSpec('arm64be' if big else 'arm64le', UC_ARCH_ARM64, mode, lang,
                     'default', endian, 64, tuple(regs), 'pc', 'sp',
                     cs=_cs('CS_ARCH_ARM64', 'CS_MODE_ARM'),
-                    call_mnemonics=('bl', 'blr'),
+                    call_mnemonics=('bl', 'blr'), return_mnemonics=('ret',),
                     flags=_flags(_A64_FLAG_BITS, 'nzcv'), status='nzcv', fields=_A64_FIELDS)
 
 
@@ -245,7 +272,7 @@ def _arm(big: bool, thumb: bool) -> ArchSpec:
     cs_mode = 'CS_MODE_THUMB' if thumb else 'CS_MODE_ARM'
     return ArchSpec(key, UC_ARCH_ARM, mode, lang, 'default', endian, 32,
                     tuple(regs), 'pc', 'sp', cs=_cs('CS_ARCH_ARM', cs_mode),
-                    call_mnemonics=('bl', 'blx'),
+                    call_mnemonics=('bl', 'blx'), return_mnemonics=_ARM_RETURNS,
                     context={'TMode': 1} if thumb else {},
                     flags=_flags(_ARM_FLAG_BITS, 'cpsr'), status='cpsr', fields=_ARM_FIELDS)
 
@@ -271,7 +298,8 @@ def _mips(big: bool, bits: int) -> ArchSpec:
                'CS_MODE_BIG_ENDIAN' if big else 'CS_MODE_LITTLE_ENDIAN')
     return ArchSpec(key, UC_ARCH_MIPS, mode, lang, 'default', endian, bits,
                     tuple(regs), 'pc', 'sp', cs=_cs('CS_ARCH_MIPS', *cs_mode),
-                    call_mnemonics=('jal', 'jalr', 'bal', 'jalx'))
+                    call_mnemonics=('jal', 'jalr', 'bal', 'jalx'),
+                    return_mnemonics=('jr $ra', 'jr ra'))
 
 
 # ---- RISC-V --------------------------------------------------------------
@@ -297,7 +325,8 @@ def _riscv(bits: int) -> ArchSpec:
     return ArchSpec(f'riscv{bits}', UC_ARCH_RISCV, mode,
                     f'RISCV:LE:{bits}:default', 'gcc', 'little', bits,
                     tuple(regs), 'pc', 'sp', cs=_cs('CS_ARCH_RISCV', *cs_mode),
-                    call_mnemonics=('jal', 'jalr', 'c.jal', 'c.jalr'))
+                    call_mnemonics=('jal', 'jalr', 'c.jal', 'c.jalr'),
+                    return_mnemonics=('ret', 'c.jr ra', 'jalr zero'))
 
 
 # ---- PowerPC -------------------------------------------------------------
@@ -331,6 +360,7 @@ def _ppc(bits: int) -> ArchSpec:
                     f'PowerPC:BE:{bits}:default', 'default', 'big', bits,
                     tuple(regs), 'pc', 'r1', cs=_cs('CS_ARCH_PPC', *cs_mode),
                     call_mnemonics=('bl', 'bla', 'bctrl', 'blrl'),
+                    return_mnemonics=('blr', 'bclr', 'bctr'),
                     flags=_flags(_PPC_FLAG_BITS, 'XER'), status='XER',
                     fields=_PPC_FIELDS)
 
@@ -358,6 +388,7 @@ def _m68k() -> ArchSpec:
                     tuple(regs), 'PC', 'SP',
                     cs=_cs('CS_ARCH_M68K', 'CS_MODE_BIG_ENDIAN', 'CS_MODE_M68K_040'),
                     call_mnemonics=('jsr', 'bsr', 'bsr.b', 'bsr.w', 'bsr.l'),
+                    return_mnemonics=('rts', 'rtr', 'rte', 'rtd'),
                     flags=_flags(_M68K_FLAG_BITS, 'SR'), status='SR',
                     fields=_M68K_FIELDS)
 
@@ -387,7 +418,8 @@ def _sparc(bits: int) -> ArchSpec:
     return ArchSpec(f'sparc{bits}', UC_ARCH_SPARC, mode,
                     f'sparc:BE:{bits}:default', 'default', 'big', bits,
                     tuple(regs), 'PC', 'sp', cs=_cs('CS_ARCH_SPARC', *cs_mode),
-                    call_mnemonics=('call', 'jmpl'))
+                    call_mnemonics=('call', 'jmpl'),
+                    return_mnemonics=('ret', 'retl'))
 
 
 # ---- TriCore -------------------------------------------------------------
@@ -416,6 +448,7 @@ def _tricore() -> ArchSpec:
                     cs=_cs('CS_ARCH_TRICORE', 'CS_MODE_TRICORE_162'),
                     call_mnemonics=('call', 'calla', 'calli',
                                     'fcall', 'fcalla', 'fcalli'),
+                    return_mnemonics=('ret', 'rfe'),
                     status='PSW', fields=_TRICORE_FIELDS)
 
 def _cs(arch_name: str, *mode_names: str) -> Optional[Tuple[int, int]]:

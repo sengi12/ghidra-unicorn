@@ -7,10 +7,9 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
-  hits, and it does not adjust hit counts as it passes them. (Moved up from
-  Known bugs: conditional breakpoints made the gap between what a forward
-  run and a backward run consider a hit larger and more visible.)
+- [ ] **Thumb tracking.** Follow `cpsr.T` per instruction and keep Ghidra's
+  `TMode` context register in step, so mixed ARM and Thumb code disassembles
+  correctly rather than being pinned to the language chosen at launch.
 
 ## Later
 
@@ -23,9 +22,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   same program under both engines and compare registers each step. A
   disagreement is a bug in a SLEIGH specification or in Unicorn, which makes
   this a useful test as well as a research tool.
-- [ ] **Thumb tracking.** Follow `cpsr.T` per instruction and keep Ghidra's
-  `TMode` context register in step, so mixed ARM and Thumb code disassembles
-  correctly rather than being pinned to the language chosen at launch.
 - [ ] **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
   for runs with no GUI, so a session can be scripted and used in CI.
 - [ ] **Console extras.** `disas`, memory search, a hexdump with an ASCII
@@ -38,13 +34,15 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Known bugs
 
-- [ ] **Step-over backwards replays the whole retained history** to work out
-  call depth, so it costs time proportional to what is kept rather than to
-  the distance travelled.
+None known. The three reverse-execution bugs listed here are fixed and are
+in the changelog under Unreleased.
 
 Fixed, kept here until the next release notes ship:
 
-- [x] Nothing outstanding from conditional breakpoints.
+- [x] Reverse-continue found execute breakpoints only, never a watchpoint
+  hit, and hit counts did not move as it passed them.
+- [x] Step-over backwards replayed the whole retained history to work out
+  call depth.
 - [x] A region mapped after a checkpoint survived a rewind to before it
   existed, because restoring mapped missing regions back but never unmapped
   extra ones.

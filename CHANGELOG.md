@@ -152,6 +152,37 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Fixed
 
+- **Reverse-continue finds watchpoint hits, not just breakpoints.** It looked
+  only at the program counter of each instruction it replayed, and a memory
+  access leaves no mark there, so a watchpoint could never be reached going
+  backwards. The search now replays each window with the memory hooks
+  *watched* rather than merely muted, which is the only place the access is
+  visible, and considers both kinds of hit together - landing where a forward
+  run would have stopped, which for a watchpoint is after the accessing
+  instruction. Conditions are honoured too: a candidate with a condition is
+  tested in the state it would have seen, and rejected candidates are skipped
+  over to the next one back.
+
+- **Hit counts rewind with the machine.** A hit count says how many times a
+  breakpoint has fired at or before where the machine is now, so going back
+  past a hit undoes it, and an ignore count that hit consumed comes back with
+  it. Arriving backwards at a breakpoint the history does not record - one
+  set after that point was first passed - counts as its first hit. The record
+  is pruned with the history, like everything else that is kept per
+  instruction.
+
+- **Reverse step-over costs the distance travelled, not the history kept.**
+  It replayed everything retained to establish an absolute call depth before
+  it could say which instructions were in the current frame, so a long
+  session made every reverse step-over slow. Depth is now kept relative to
+  the current position, which makes it local - a call met on the way back is
+  one frame shallower, a return is one frame deeper, nothing else moves it -
+  so the search walks back only as far as it travels, one checkpoint window
+  at a time, and needs neither an absolute depth nor a stack of return
+  addresses. `arch.py` gains the return mnemonics this needs, each one
+  checked against what Capstone actually emits rather than taken from a
+  manual.
+
 - **Reverse execution rewinds a mapping.** Restoring a checkpoint mapped back
   the regions it had and left alone any that had appeared since, so a region
   mapped after the checkpoint survived a rewind to before it existed and the
