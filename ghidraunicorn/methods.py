@@ -133,6 +133,27 @@ def _require_stopped():
     return target
 
 
+def _require_reversible(back: int = 1):
+    """A target that can go `back` instructions into its past.
+
+    A terminated target is fine here: going back is how you leave that state.
+    """
+    target = commands.STATE.target
+    if target.running:
+        raise TargetError('Target is running; interrupt it first')
+    if not target.can_reverse:
+        raise TargetError(
+            f'No history to go back to: the target is at instruction '
+            f'{target.icount}, the earliest recorded is '
+            f'{target.earliest_icount}')
+    want = target.icount - back
+    if want < target.earliest_icount:
+        raise TargetError(
+            f'Cannot step back {back}: that is instruction {want} and the '
+            f'history only reaches back to {target.earliest_icount}')
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Generic
 
@@ -304,6 +325,46 @@ def step_advance(thread: Thread, address: Address) -> None:
     target = _require_stopped()
     offset = thread.trace.extra.map_back(address)
     target.advance(offset)
+
+
+# ---------------------------------------------------------------------------
+# Reverse execution
+#
+# The action, icon and signature of each of these are the ones Ghidra's gdb
+# connector uses, so the Debugger's existing reverse toolbar buttons drive them.
+
+@REGISTRY.method(action='step_ext', icon='icon.debugger.resume.back')
+def resume_back(process: Process) -> None:
+    """Run the emulator backwards to the previous breakpoint hit."""
+    _match(PROCESS_PATTERN, process, 'a Process')
+    _require_reversible().resume_back()
+
+
+@REGISTRY.method(action='step_ext', icon='icon.debugger.step.back.into')
+def step_back_into(thread: Thread,
+                   n: Annotated[int, ParamDesc(display='N')] = 1) -> None:
+    """Undo one instruction."""
+    _match(THREAD_PATTERN, thread, 'a Thread')
+    n = max(n, 1)
+    _require_reversible(n).step_back(n)
+
+
+@REGISTRY.method(action='step_ext', icon='icon.debugger.step.back.over')
+def step_back_over(thread: Thread,
+                   n: Annotated[int, ParamDesc(display='N')] = 1) -> None:
+    """Undo one instruction, stepping back over whole calls (needs Capstone)."""
+    _match(THREAD_PATTERN, thread, 'a Thread')
+    n = max(n, 1)
+    _require_reversible(n).step_back_over(n)
+
+
+@REGISTRY.method(action='step_ext', display='Go To Instruction')
+def step_goto_icount(thread: Thread,
+                     icount: Annotated[int, ParamDesc(display='Instruction')] = 0) -> None:
+    """Restore the state the target had at an instruction count."""
+    _match(THREAD_PATTERN, thread, 'a Thread')
+    target = commands.STATE.target
+    _require_reversible(target.icount - icount).goto_icount(icount)
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,11 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   s, si, step [N]        step N instructions into calls
   n, ni, next [N]        step N instructions over calls
   adv, advance ADDR      run until ADDR
+  rsi, back [N]          step N instructions backwards
+  rni [N]                step N instructions backwards, over calls
+  rc                     run backwards to the previous breakpoint hit
+  goto N                 go to instruction N (0 is where the target started)
+  icount                 instruction count and how far back the history goes
   b, break ADDR          breakpoint at ADDR
   w, watch ADDR [SIZE] [r|w|rw]   watchpoint (default 4 bytes, rw)
   d, delete NUM          delete breakpoint NUM
@@ -117,6 +122,10 @@ class UnicornConsole(code.InteractiveConsole):
             's': self.cmd_step, 'si': self.cmd_step, 'step': self.cmd_step,
             'n': self.cmd_next, 'ni': self.cmd_next, 'next': self.cmd_next,
             'adv': self.cmd_advance, 'advance': self.cmd_advance,
+            'rsi': self.cmd_back, 'back': self.cmd_back,
+            'rni': self.cmd_back_over,
+            'rc': self.cmd_reverse_continue,
+            'goto': self.cmd_goto, 'icount': self.cmd_icount,
             'b': self.cmd_break, 'break': self.cmd_break,
             'w': self.cmd_watch, 'watch': self.cmd_watch,
             'd': self.cmd_delete, 'delete': self.cmd_delete,
@@ -209,6 +218,34 @@ class UnicornConsole(code.InteractiveConsole):
         if len(args) < 2:
             raise ValueError('usage: advance ADDR')
         self._stopped().advance(self.value(args[1]))
+
+    # ---- going backwards -------------------------------------------------
+
+    def _reversible(self) -> UnicornTarget:
+        """Unlike the forward commands this one accepts a terminated target:
+        stepping back is how you get out of that state."""
+        if self.target.running:
+            raise TargetError('target is running (interrupt it from Ghidra first)')
+        return self.target
+
+    def cmd_back(self, args: List[str]) -> None:
+        n = int(args[1], 0) if len(args) > 1 else 1
+        self._reversible().step_back(n)
+
+    def cmd_back_over(self, args: List[str]) -> None:
+        n = int(args[1], 0) if len(args) > 1 else 1
+        self._reversible().step_back_over(n)
+
+    def cmd_reverse_continue(self, args: List[str]) -> None:
+        self._reversible().resume_back()
+
+    def cmd_goto(self, args: List[str]) -> None:
+        if len(args) < 2:
+            raise ValueError('usage: goto N   (instruction number)')
+        self._reversible().goto_icount(int(args[1], 0))
+
+    def cmd_icount(self, args: List[str]) -> None:
+        self.write(self.target.timeline.describe() + '\n')
 
     def cmd_kill(self, args: List[str]) -> None:
         t = self.target
@@ -416,6 +453,10 @@ class UnicornConsole(code.InteractiveConsole):
         """A stop happened - possibly from Ghidra while we sit at the prompt."""
         self.write('\n')
         self.ctx.show(ev)
+        if self.target.timeline.recording:
+            # Where we are in time: the number `goto` and `rsi` count in.
+            self.write(f'instruction {self.target.icount}'
+                       f' (history from {self.target.earliest_icount})\n')
         if self._readline is not None:
             try:
                 self.write(getattr(sys, 'ps1', '>>> ') + self._readline.get_line_buffer())
