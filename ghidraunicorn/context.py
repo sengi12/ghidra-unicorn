@@ -49,8 +49,9 @@ class Context:
 
     def __init__(self, target: UnicornTarget, out: Optional[TextIO] = None,
                  color: Optional[bool] = None, disasm_lines: int = 8,
-                 stack_words: int = 8, width: int = 100) -> None:
+                 stack_words: int = 8, width: int = 100, symbols=None) -> None:
         self.target = target
+        self.symbols = symbols
         self.out = out or sys.stdout
         self.p = Palette(_want_color(self.out) if color is None else color)
         self.disasm_lines = disasm_lines
@@ -85,10 +86,18 @@ class Context:
         word = int.from_bytes(raw, 'little' if self.target.spec.endian == 'little' else 'big')
         printable = all(32 <= b < 127 for b in raw)
         text = f' -> {self._fmt_val(word)}'
+        text += self._symbol(v)
         if printable and len(raw) >= 4:
             text += f' {raw.decode("ascii")!r}'
         colorer = {'code': self.p.code, 'stack': self.p.stack, 'data': self.p.data}[kind]
         return colorer(text)
+
+    def _symbol(self, address: int) -> str:
+        """ <name+0x8>, when a symbol table is loaded and covers the address."""
+        if self.symbols is None:
+            return ''
+        text = self.symbols.describe(address)
+        return f' <{text}>' if text else ''
 
     def _rule(self, name: str) -> str:
         label = f'[ {name} ]'
@@ -155,7 +164,7 @@ class Context:
             except UcError:
                 raw = ''
             marker = ' → ' if addr == pc else ('●  ' if addr in bps else '   ')
-            text = f'{marker}{addr:#x}  {raw:<16} {mnem:<8} {ops}'
+            text = f'{marker}{addr:#x}{self._symbol(addr)}  {raw:<16} {mnem:<8} {ops}'
             if addr == pc:
                 text = self.p.pc(text)
             elif addr in bps:

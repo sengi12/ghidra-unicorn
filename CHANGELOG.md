@@ -16,6 +16,21 @@ Notable changes to ghidra-unicorn. The format follows
   than dropped. A test asserts the bytes are identical to afl-unicorn's own
   writer for the same input, so the files are interchangeable. Not yet wired
   to a console command or launcher option.
+- **Symbol names** in `symbols.py`, loaded from JSON that
+  `tools/export_symbols.py` writes from an open Ghidra program. The context
+  now annotates disassembly and pointer targets as `<main+0x40>`. An
+  enclosing function wins over a nearer generated label, the way gdb and IDA
+  report an address, and a label inside a function does not describe
+  addresses outside it. Not yet wired to a launcher option or to breakpoints
+  by name.
+
+### Changed
+
+- **`tools/setup_project.py` seeds the entry point.** A raw binary has no
+  entry point for auto-analysis to follow, so the sample imported as
+  undefined bytes and the static listing came up empty. It now disassembles
+  at the base address and declares `main` there before analysing, which is
+  also what makes the symbol export produce anything.
 
 ## [0.1.0] - 2026-09-18
 

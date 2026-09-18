@@ -23,9 +23,10 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Symbols from Ghidra.** Export the open program's symbols so `b main`
-  works by name, the context and stack annotate addresses with function
-  names, and stubs can be attached by symbol rather than by address.
+- [~] **Symbols from Ghidra.** `symbols.py` and `tools/export_symbols.py`
+  are in, and the context annotates disassembly and pointers with
+  `<main+0x40>`. Still to wire: a `--symbols` option and resolving a name
+  where the console takes an address, so `b main` works.
 - [ ] **Syscall and function stubs.** Dispatch `syscall` / `svc` / `sc` to
   Python handlers, with a small Linux layer for read, write, mmap, brk and
   exit. Add symbol-driven stubs for malloc, free and the common string and

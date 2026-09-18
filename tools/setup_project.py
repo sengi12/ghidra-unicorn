@@ -53,7 +53,22 @@ def main():
             program.setImageBase(base, True)
         finally:
             program.endTransaction(txid, True)
+
+        # A raw blob has no entry point, so auto-analysis has nothing to follow
+        # and would leave the listing as undefined bytes. Seed it: disassemble
+        # at the base and declare a function there, which is where the example
+        # harness starts execution.
+        from ghidra.program.flatapi import FlatProgramAPI
+        api = FlatProgramAPI(program)
+        txid = program.startTransaction('seed entry point')
+        try:
+            api.disassemble(base)
+            api.createFunction(base, 'main')
+        finally:
+            program.endTransaction(txid, True)
         gp.analyze(program)
+        functions = program.getFunctionManager().getFunctionCount()
+        print(f'analysis found {functions} function(s)')
         gp.saveAs(program, '/', 'simple_target.bin', True)
         print(f'imported {os.path.basename(binary)} as MIPS:BE:32:default at {CODE_BASE:#x} and analyzed it')
     finally:
