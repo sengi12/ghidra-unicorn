@@ -30,7 +30,7 @@ history exactly and stay silent while doing it. Records older than the
 timeline's earliest instruction can never be reached again and are dropped,
 so the log costs nothing that the history is not already paying for.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from unicorn import (UC_HOOK_INSN, UC_HOOK_INTR, UC_PROT_ALL, UC_PROT_EXEC,

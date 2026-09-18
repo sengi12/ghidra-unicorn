@@ -150,7 +150,7 @@ class Comparison:
         if self.stopped:
             text += f'; stopped: {self.stopped}'
         if self.unmatched:
-            text += f'\nnot compared (only one engine has them): ' \
+            text += '\nnot compared (only one engine has them): ' \
                     + ', '.join(sorted(self.unmatched))
         return text
 

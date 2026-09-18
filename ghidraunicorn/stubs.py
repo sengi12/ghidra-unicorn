@@ -42,10 +42,10 @@ debugger's allocator, not libc's: the aim is that a program under
 examination behaves plausibly, and that a use-after-free or an overflow is
 visible rather than silently absorbed.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from unicorn import UC_HOOK_CODE, UC_PROT_ALL, UcError
+from unicorn import UC_HOOK_CODE, UcError
 
 from . import abi as _abi
 from .abi import CallAbi

@@ -24,7 +24,7 @@ import json
 import os
 import sys
 import zlib
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from unicorn import UC_PROT_EXEC, UC_PROT_READ, UC_PROT_WRITE, Uc, UcError
 

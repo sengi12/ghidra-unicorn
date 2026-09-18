@@ -17,7 +17,6 @@ it. Nothing has to be stripped out first, and there is no second format to
 keep in step with the first.
 """
 from datetime import datetime, timezone
-import os
 import re
 import shlex
 import sys
