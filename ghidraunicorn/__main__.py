@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help='program image path, used to name the module (OPT_TARGET_IMG)')
     p.add_argument('--start', default=_env('OPT_START'), help='start address (OPT_START)')
     p.add_argument('--end', default=_env('OPT_END'), help='stop address (OPT_END)')
+    p.add_argument('--symbols', default=_env('OPT_SYMBOLS'),
+                   help='JSON symbol table from tools/export_symbols.py, so '
+                        'addresses get names and `b main` works (OPT_SYMBOLS)')
+    p.add_argument('--symbols-at', default=_env('OPT_SYMBOLS_AT'),
+                   help='rebase the symbols so their image base lands here '
+                        '(OPT_SYMBOLS_AT)')
     p.add_argument('--regs', default=_env('OPT_REGS'),
                    help='initial register overrides, e.g. "cpsr=0x60000030,r0=1" (OPT_REGS)')
     p.add_argument('--preload', default=_env('OPT_PRELOAD', 'true'),
@@ -144,13 +150,32 @@ def main(argv=None) -> int:
     commands.activate()
     print('Trace started. Ghidra is now driving the emulator.', flush=True)
 
+    symbols = _symbols(args)
     if args.no_repl or not sys.stdin.isatty():
         _wait_for_disconnect()
     else:
         from .console import UnicornConsole
-        UnicornConsole(target, loaded).run()
+        UnicornConsole(target, loaded, symbols=symbols).run()
     commands.disconnect()
     return 0
+
+
+def _symbols(args):
+    """Load the symbol table, rebased if asked."""
+    if not args.symbols:
+        return None
+    from .symbols import SymbolTable
+    try:
+        table = SymbolTable.load(args.symbols)
+    except (OSError, ValueError) as e:
+        print(f'could not read symbols from {args.symbols}: {e}', flush=True)
+        return None
+    at = _addr(args.symbols_at)
+    if at is not None:
+        table = table.rebase(at)
+    print(f'{len(table)} symbols from {os.path.basename(args.symbols)}'
+          + (f', rebased to {at:#x}' if at is not None else ''), flush=True)
+    return table
 
 
 def _wait_for_disconnect() -> None:

@@ -7,25 +7,12 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [~] **Symbols from Ghidra.** `symbols.py` and `tools/export_symbols.py`
-  are in, and the context annotates disassembly and pointers with
-  `<main+0x40>`. Still to wire: a `--symbols` option and resolving a name
-  where the console takes an address, so `b main` works.
 - [ ] **Syscall and function stubs.** Dispatch `syscall` / `svc` / `sc` to
   Python handlers, with a small Linux layer for read, write, mmap, brk and
   exit. Add symbol-driven stubs for malloc, free and the common string and
   memory functions; afl-unicorn's loader already carries a simple heap to
   lift. This is the biggest practical limit today: anything that leaves the
   binary has to be stubbed.
-- [~] **Coverage handoff to ghidra-aflcov.** The recorder and drcov writer
-  are in `coverage.py`, proved byte-identical to afl-unicorn's writer, and
-  triage writes one file per input with `--coverage-dir`. Still to wire: a
-  console command and a launcher option, so a live session can record and
-  save on exit.
-- [~] **Input provenance.** `provenance.py` records reads of the input
-  buffer and answers which offsets a given instruction consumed and which
-  bytes were never read, and the triage report shows it per input. Still to
-  wire: a console command.
 - [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
   model already carries Condition and Ignore Count; populate them and
   evaluate a Python predicate in the hook.

@@ -32,7 +32,7 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   rc                     run backwards to the previous breakpoint hit
   goto N                 go to instruction N (0 is where the target started)
   icount                 instruction count and how far back the history goes
-  b, break ADDR          breakpoint at ADDR
+  b, break ADDR          breakpoint at ADDR (a symbol name works: `b main`)
   w, watch ADDR [SIZE] [r|w|rw]   watchpoint (default 4 bytes, rw)
   d, delete NUM          delete breakpoint NUM
   bl, breakpoints        list breakpoints
@@ -41,6 +41,9 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   r, regs [NAME [VALUE]] show registers, one register, or set one
                          flags and fields too: r ZF 1, r cpsr.T 1, r cpsr.M 0x13
   fields                 list the status register's bit fields
+  cov on|off|save PATH   record basic blocks and write drcov for ghidra-aflcov
+  prov on [BASE LEN]     watch the input buffer; `prov` reports what was read
+  sym NAME|ADDR          look a symbol up in either direction
   m, set ADDR HEXBYTES   write bytes, e.g. m 0x3000 41424344
   ctx, context           print the context again
   k, kill                terminate the target
@@ -110,12 +113,17 @@ class _Completer:
 class UnicornConsole(code.InteractiveConsole):
 
     def __init__(self, target: UnicornTarget, loaded=None,
-                 out: Optional[TextIO] = None, color: Optional[bool] = None) -> None:
+                 out: Optional[TextIO] = None, color: Optional[bool] = None,
+                 symbols=None) -> None:
         self.target = target
+        self.loaded = loaded
+        self.symbols = symbols
         self.out = out or sys.stdout
-        self.ctx = Context(target, self.out, color=color)
+        self.ctx = Context(target, self.out, color=color, symbols=symbols)
+        self.coverage = None
+        self.provenance = None
         local = {'target': target, 'uc': target.uc, 'commands': commands,
-                 'loaded': loaded, 'ctx': self.ctx}
+                 'loaded': loaded, 'ctx': self.ctx, 'symbols': symbols}
         super().__init__(locals=local)
         self.commands: Dict[str, Callable[[List[str]], None]] = {
             'c': self.cmd_continue, 'continue': self.cmd_continue,
@@ -137,6 +145,9 @@ class UnicornConsole(code.InteractiveConsole):
             'k': self.cmd_kill, 'kill': self.cmd_kill,
             'help': self.cmd_help, '?': self.cmd_help,
             'fields': self.cmd_fields,
+            'cov': self.cmd_coverage, 'coverage': self.cmd_coverage,
+            'prov': self.cmd_provenance, 'provenance': self.cmd_provenance,
+            'sym': self.cmd_symbol, 'symbol': self.cmd_symbol,
         }
         self.quit = False
         self._readline = None
@@ -190,6 +201,10 @@ class UnicornConsole(code.InteractiveConsole):
         t = self.target
         if t.spec.has_reg(text) or t.spec.flag(text) is not None:
             return t.reg_read(text)
+        if self.symbols is not None:
+            addr = self.symbols.address_of(text)
+            if addr is not None:
+                return addr
         return int(text, 0)
 
     # ---- execution -------------------------------------------------------
@@ -385,6 +400,80 @@ class UnicornConsole(code.InteractiveConsole):
         for f in t.spec.fields:
             bits = f'bit {f.bit}' if f.width == 1 else f'bits {f.bit + f.width - 1}:{f.bit}'
             self.write(f'  {t.spec.status}.{f.name:<6} {bits:<11} = {f.label(v)}\n')
+
+    def cmd_coverage(self, args: List[str]) -> None:
+        """cov [on|off|save PATH|reset]"""
+        from .coverage import SessionCoverage
+        what = args[1] if len(args) > 1 else 'status'
+        if what in ('on', 'start'):
+            if self.coverage is None:
+                modules = getattr(self.loaded, 'modules', ()) or ()
+                self.coverage = SessionCoverage(self.target, modules)
+            self.coverage.start()
+            self.write('recording basic-block coverage\n')
+        elif what in ('off', 'stop'):
+            if self.coverage is not None:
+                self.coverage.stop()
+            self.write('stopped recording\n')
+        elif what == 'reset':
+            if self.coverage is not None:
+                self.coverage.reset()
+            self.write('coverage cleared\n')
+        elif what == 'save':
+            if self.coverage is None:
+                raise ValueError('nothing recorded; `cov on` first')
+            if len(args) < 3:
+                raise ValueError('usage: cov save PATH')
+            n = self.coverage.save(args[2])
+            self.write(f'wrote {args[2]}: {n} blocks\n')
+            for path, count in sorted(self.coverage.stats().items()):
+                self.write(f'  {count:6} {path}\n')
+        else:
+            if self.coverage is None:
+                self.write('not recording; `cov on` to start\n')
+            else:
+                state = 'recording' if self.coverage.recording else 'stopped'
+                self.write(f'{state}, {self.coverage.block_count} blocks\n')
+
+    def cmd_provenance(self, args: List[str]) -> None:
+        """prov [on BASE LENGTH|off]: which input bytes the program reads."""
+        from .provenance import InputProvenance
+        what = args[1] if len(args) > 1 else 'show'
+        if what in ('on', 'start'):
+            if len(args) >= 4:
+                base, length = self.value(args[2]), self.value(args[3])
+            else:
+                region = getattr(self.loaded, 'input_region', None)
+                if not region:
+                    raise ValueError('usage: prov on BASE LENGTH '
+                                     '(the harness declares no INPUT_BASE)')
+                base, length = region[0], region[1] or 0x1000
+            self.provenance = InputProvenance(self.target, base, length)
+            self.provenance.start()
+            self.write(f'watching {length} bytes at {base:#x}\n')
+        elif what in ('off', 'stop'):
+            if self.provenance is not None:
+                self.provenance.stop()
+            self.write('stopped watching\n')
+        else:
+            if self.provenance is None:
+                raise ValueError('not watching; `prov on` first')
+            self.write(self.provenance.summary(pc=self.target.pc()) + '\n')
+
+    def cmd_symbol(self, args: List[str]) -> None:
+        """sym NAME_OR_ADDR: look a symbol up in either direction."""
+        if self.symbols is None:
+            raise ValueError('no symbols loaded; launch with --symbols FILE')
+        if len(args) < 2:
+            self.write(f'{len(self.symbols)} symbols loaded\n')
+            return
+        text = args[1]
+        addr = self.symbols.address_of(text)
+        if addr is not None:
+            self.write(f'{text} = {addr:#x}\n')
+            return
+        where = self.symbols.describe(self.value(text))
+        self.write(f'{self.value(text):#x} = {where or "(no symbol)"}\n')
 
     def cmd_context(self, args: List[str]) -> None:
         self.ctx.show()

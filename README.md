@@ -233,7 +233,8 @@ Flag and field names are the same ones the console's `fields` command lists.
   (`cpsr 0x600001d3 [ n Z C v q ... I F t M=SVC ]`). `help` lists the
   commands: `c`, `si N`, `ni N`, `adv ADDR`, `b ADDR`, `watch ADDR SIZE w`,
   `d N`, `bl`, `x/8xw ADDR`, `x/s ADDR`, `r NAME VALUE`, `r cpsr.M 0x13`,
-  `fields`, `m ADDR HEXBYTES`, `ctx`, `k`, `q`, and going backwards with
+  `fields`, `cov`, `prov`, `sym`, `m ADDR HEXBYTES`, `ctx`, `k`, `q`, and
+  going backwards with
   `rsi N`, `rni N`, `rc`, `goto N` and `icount`. Addresses accept registers and
   `reg+off`. Everything else is Python with `target`, `uc`, `commands`.
   Set `NO_COLOR=1` to turn colour off.
@@ -369,17 +370,26 @@ offsets were read and by which instruction, so a crash points back at the
 bytes that reached it and you can see which parts of the input were never
 looked at.
 
-Both are libraries today, usable from the console's Python prompt:
+Both are console commands:
 
-```python
-from ghidraunicorn.coverage import SessionCoverage
-cov = SessionCoverage(target, loaded.modules); cov.start()
-# ... run ...
-cov.save('run.drcov')
+```
+cov on                 # start recording basic blocks
+c                      # ... run ...
+cov save run.drcov     # write it for ghidra-aflcov
+prov on                # watch the input buffer the harness declared
+prov                   # which offsets were read, and which never were
 ```
 
-Wiring them to a console command and a launcher option is on the
-[roadmap](TODO.md).
+Point the launcher's *Symbols* field at the exported JSON and the console
+takes names where it takes addresses:
+
+```
+b main
+sym 0x100040           ->  main+0x40
+```
+
+If the harness loads the code somewhere other than the image base the symbols
+were exported at, *Symbols base* rebases them.
 
 ## How it is built
 
@@ -405,7 +415,7 @@ debugger-launchers/    the launchers Ghidra shows in its menu:
   local-unicorn.ps1      Windows, PowerShell
   local-unicorn.bat      Windows, cmd, via local-unicorn-win.py
 examples/      harnesses
-tests/         pytest, no Ghidra needed (166 tests, incl. a real-pty test)
+tests/         pytest, no Ghidra needed (169 tests, incl. a real-pty test)
 tools/e2e_ghidra.py     drives a real Ghidra through the whole flow
 tools/setup_project.py  makes a project with the sample imported
 tools/export_symbols.py exports a program's symbols as JSON

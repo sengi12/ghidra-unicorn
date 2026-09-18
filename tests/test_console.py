@@ -121,3 +121,52 @@ def test_context_disassembly_without_history_at_region_start():
     uc.reg_write(UC_MIPS_REG_PC, 0x100000)
     text = Context(UnicornTarget(uc), io.StringIO(), color=False).render()
     assert '→ 0x100000' in text and 'addiu' in text
+
+
+def test_symbol_names_work_as_addresses():
+    from ghidraunicorn.symbols import Symbol, SymbolTable
+    t = make_x64()
+    syms = SymbolTable([Symbol('entry', CODE, 0x30, 'function'),
+                        Symbol('spin', 0x1025, 2, 'function')])
+    out = io.StringIO()
+    c = UnicornConsole(t, out=out, color=False, symbols=syms)
+    assert c.value('spin') == 0x1025
+    assert c.value('entry+0x7') == CODE + 7
+    c.push('b spin')
+    assert any(b.address == 0x1025 for b in t.breakpoints.values())
+    c.push('sym entry')
+    assert 'entry = 0x1000' in out.getvalue()
+    c.push('sym 0x1007')
+    assert 'entry+0x7' in out.getvalue()
+
+
+def test_coverage_command_records_and_saves(tmp_path):
+    from ghidraunicorn.loaders import Module
+    t = make_x64(end=0x1025)
+    out = io.StringIO()
+    c = UnicornConsole(t, loaded=type('L', (), {'modules': [Module('/tmp/p', CODE, 0x1000)]})(),
+                       out=out, color=False)
+    c.push('cov')
+    assert 'not recording' in out.getvalue()
+    c.push('cov on')
+    c.push('c')
+    c.push('cov off')
+    target = tmp_path / 'run.drcov'
+    c.push(f'cov save {target}')
+    assert target.exists() and 'blocks' in out.getvalue()
+    assert b'DRCOV VERSION: 2' in target.read_bytes()
+    c.push('cov reset')
+    assert c.coverage.block_count == 0
+
+
+def test_provenance_command_reports_reads():
+    t = make_x64(end=0x1025)
+    out = io.StringIO()
+    c = UnicornConsole(t, out=out, color=False)
+    c.push('prov')                       # not watching yet
+    assert 'error:' in out.getvalue()
+    c.push(f'prov on {DATA} 16')
+    c.push('c')
+    c.push('prov')
+    text = out.getvalue()
+    assert 'read:   0-7' in text and 'unread: 8-15' in text

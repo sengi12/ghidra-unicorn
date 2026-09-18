@@ -80,6 +80,14 @@ Notable changes to ghidra-unicorn. The format follows
   conventions for each file type. They are unverified on Windows: there was
   no Windows machine to run them on.
 
+- **Console commands for the three libraries.** `cov on|off|save PATH`
+  records basic blocks and writes drcov, `prov on` watches the input buffer
+  and `prov` reports which offsets were read, and `sym` looks a symbol up in
+  either direction. With a symbol table loaded, anywhere the console takes an
+  address now takes a name, so `b main` works. The launcher gained *Symbols*
+  and *Symbols base* fields, and the command line `--symbols` and
+  `--symbols-at`.
+
 ### Fixed
 
 - **Stepping toward an end address that is a branch delay slot no longer
