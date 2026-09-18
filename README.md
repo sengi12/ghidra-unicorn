@@ -336,6 +336,32 @@ stops reproducing.
 `--commands-file` reads the same thing from a file. Commands split on
 newlines and semicolons, quotes are respected, and `#` starts a comment.
 
+## Recording a session
+
+`--record session.gu`, or `record session.gu` in the console, logs
+everything to a file:
+
+```
+# ghidra-unicorn session, 2026-09-18T21:55:59Z
+# architecture: x64 (x86:LE:64:default)
+# launched as: python -m ghidraunicorn --harness h.py --record session.gu
+b 0x40000c
+#  | breakpoint 1 at 0x40000c
+c
+# stop: breakpoint - Breakpoint 1 at 0x40000c at instruction 3
+#  | ... the whole context at the stop ...
+```
+
+The commands are plain lines and everything else is a comment, so the same
+file reads as a transcript and replays as a script:
+
+```
+python -m ghidraunicorn --harness h.py --batch --commands-file session.gu
+```
+
+Which makes it worth attaching to a bug report: whoever reads it can see
+what you did and run it.
+
 ## Triaging a fuzzing run
 
 Stepping one crash is useful; a fuzzer hands you a directory of them. Replay

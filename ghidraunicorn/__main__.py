@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--commands-file', default=_env('OPT_COMMANDS_FILE'),
                    help='file of console commands, one per line '
                         '(OPT_COMMANDS_FILE)')
+    p.add_argument('--record', default=_env('OPT_RECORD'),
+                   help='log this session to a file: the commands as '
+                        'themselves and everything else as comments, so the '
+                        'file both reads as a transcript and replays with '
+                        '--commands-file (OPT_RECORD)')
     p.add_argument('--batch', action='store_true',
                    default=_bool(_env('OPT_BATCH'), False),
                    help='run the commands and exit, with no prompt and no '
@@ -204,6 +209,9 @@ def main(argv=None) -> int:
 
     from .console import UnicornConsole
     console = UnicornConsole(target, loaded, symbols=symbols)
+    if args.record:
+        console.start_recording(args.record,
+                                argv=[sys.argv[0]] + list(argv or sys.argv[1:]))
     failed = 0
     if script:
         failed = console.run_script(script)
@@ -217,6 +225,7 @@ def main(argv=None) -> int:
             _wait_for_disconnect()
     else:
         console.run()
+    console.stop_recording()
     if attached:
         commands.disconnect()
     return 1 if failed else 0

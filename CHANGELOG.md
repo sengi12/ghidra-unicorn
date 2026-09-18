@@ -9,6 +9,17 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Session recording.** `--record PATH`, or `record PATH` in the console,
+  logs the session to a file that is both a transcript and a script. The
+  trick is that `#` already starts a comment, so the commands go in as
+  themselves, one per line, and everything else - the setup, what the target
+  printed, the full context at every stop - goes in behind a `#`. The result
+  reads as a transcript and replays with `--commands-file` without a word
+  being edited out of it, so there is no second format to keep in step with
+  the first. Stops are recorded by listening to the target rather than the
+  console, so one caused from Ghidra's buttons is logged like one caused by
+  a command typed here. Colour escapes are stripped on the way in.
+
 - **Console extras.** `disas [ADDR] [N]` disassembles with symbol names, a
   marker on the program counter and a dot on each breakpoint, and `x/5i`
   does the same through the examine command. `hexdump ADDR [N]` (`hd`) shows

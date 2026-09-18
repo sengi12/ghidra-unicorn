@@ -53,6 +53,8 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   cov on|off|save PATH   record basic blocks and write drcov for ghidra-aflcov
   prov on [BASE LEN]     watch the input buffer; `prov` reports what was read
   sym NAME|ADDR          look a symbol up in either direction
+  record PATH|off        log this session to a file; the file replays with
+                         --commands-file, and reads as a transcript
   sys [N]                the system call layer, and the last N calls
   stub [NAME ADDR]       list the stubbed functions, or stand in for one
   heap                   blocks the stubbed malloc has handed out
@@ -236,12 +238,15 @@ class UnicornConsole(code.InteractiveConsole):
             'cov': self.cmd_coverage, 'coverage': self.cmd_coverage,
             'prov': self.cmd_provenance, 'provenance': self.cmd_provenance,
             'sym': self.cmd_symbol, 'symbol': self.cmd_symbol,
+            'record': self.cmd_record,
             'sys': self.cmd_syscalls, 'syscalls': self.cmd_syscalls,
             'stub': self.cmd_stubs, 'stubs': self.cmd_stubs,
             'heap': self.cmd_heap,
         }
         self.quit = False
         self._readline = None
+        #: Set by `record` or by --record; see recording.py.
+        self.recorder = None
         #: How many commands have failed; `run_script` reports it, and a
         #: batch run exits non-zero when it is not zero.
         self.errors = 0
@@ -252,6 +257,8 @@ class UnicornConsole(code.InteractiveConsole):
         stripped = line.strip()
         if not stripped:
             return super().push(line, *args, **kwargs)
+        if self.recorder is not None:
+            self.recorder.command(stripped)
         head = stripped.split(None, 1)[0]
         if head in ('q', 'quit', 'exit'):
             self.quit = True
@@ -280,6 +287,8 @@ class UnicornConsole(code.InteractiveConsole):
     def write(self, data: str) -> None:
         self.out.write(data)
         self.out.flush()
+        if self.recorder is not None:
+            self.recorder.output(data)
 
     def _tail(self, word: int) -> str:
         """The command line from word `word` on, exactly as it was typed.
@@ -377,6 +386,35 @@ class UnicornConsole(code.InteractiveConsole):
             from .target import StopEvent
             hooks.on_stop(StopEvent('exit', t.pc(), 'Killed'))
             self.write('target killed\n')
+
+    # ---- recording -------------------------------------------------------
+
+    def cmd_record(self, args: List[str]) -> None:
+        if len(args) < 2:
+            if self.recorder is None:
+                self.write('not recording; `record PATH` starts\n')
+            else:
+                self.write(self.recorder.describe() + '\n')
+            return
+        if args[1].lower() in ('off', 'stop', 'end'):
+            self.stop_recording()
+            return
+        self.start_recording(args[1])
+
+    def start_recording(self, path: str, argv: Optional[List[str]] = None) -> None:
+        from .recording import SessionRecorder
+        self.stop_recording()
+        description = self.loaded.description if self.loaded is not None else ''
+        self.recorder = SessionRecorder(path, self.target, argv=argv,
+                                        description=description)
+        self.write(f'recording this session to {path}\n')
+
+    def stop_recording(self) -> None:
+        if self.recorder is None:
+            return
+        recorder, self.recorder = self.recorder, None
+        recorder.close()
+        self.write(recorder.describe() + '\n')
 
     # ---- standing in for what is not there -------------------------------
 
@@ -828,7 +866,8 @@ class UnicornConsole(code.InteractiveConsole):
         try:
             for line in split_commands(text):
                 if echo:
-                    self.write(f'{getattr(sys, "ps1", ">>> ")}{line}\n')
+                    self.out.write(f'{getattr(sys, "ps1", ">>> ")}{line}\n')
+                    self.out.flush()
                 try:
                     self.push(line)
                 except SystemExit:
@@ -850,7 +889,7 @@ class UnicornConsole(code.InteractiveConsole):
 
     def _on_stop_quietly(self, ev) -> None:
         """A stop during a script: report it without redrawing a prompt."""
-        self.ctx.show(ev)
+        self.write(self.ctx.render(ev))
 
     def showtraceback(self) -> None:          # type: ignore[override]
         """Count Python errors as well as command errors.
@@ -872,7 +911,7 @@ class UnicornConsole(code.InteractiveConsole):
         self.setup_readline()
         self.target.listeners.append(self._on_stop)
         try:
-            self.ctx.show()
+            self.write(self.ctx.render())
             self.interact(banner=banner, exitmsg='')
         except SystemExit:
             pass
@@ -880,11 +919,12 @@ class UnicornConsole(code.InteractiveConsole):
             self.save_history()
             if self._on_stop in self.target.listeners:
                 self.target.listeners.remove(self._on_stop)
+            self.stop_recording()
 
     def _on_stop(self, ev) -> None:
         """A stop happened - possibly from Ghidra while we sit at the prompt."""
         self.write('\n')
-        self.ctx.show(ev)
+        self.write(self.ctx.render(ev))
         if self.target.timeline.recording:
             # Where we are in time: the number `goto` and `rsi` count in.
             self.write(f'instruction {self.target.icount}'

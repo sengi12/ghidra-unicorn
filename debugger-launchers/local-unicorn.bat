@@ -38,6 +38,7 @@
 ::@env OPT_TRACE_CALLS:bool=false "Trace calls" "Print every system call and stub as it happens."
 ::@env OPT_COMMANDS:str="" "Commands" "Console commands to run once the target is loaded, separated by ; or newlines."
 ::@env OPT_COMMANDS_FILE:file="" "Command file" "File of console commands, one per line."
+::@env OPT_RECORD:file="" "Record to" "Log this session to a file: commands as themselves and everything else as comments, so it replays with --commands-file."
 ::@env OPT_PRELOAD:bool=true "Preload memory" "Copy all mapped memory into the trace at launch (capped at 32 MiB)."
 ::@env OPT_PYTHON_EXE:file="python3" "python command" "Python 3 with unicorn (and protobuf) installed. Omit the path to resolve using PATH."
 
