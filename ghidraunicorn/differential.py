@@ -289,6 +289,11 @@ class PcodeEngine(Engine):
         return self._space.getAddress(value)
 
     def pc(self) -> int:
+        # What the emulator itself calls the next instruction, rather than a
+        # register read that depends on naming the program counter.
+        address = self.helper.getExecutionAddress()
+        if address is not None:
+            return int(address.getOffset()) & 0xffff_ffff_ffff_ffff
         return int(self.helper.readRegister(self._pc_register).longValue()) \
             & 0xffff_ffff_ffff_ffff
 
@@ -296,6 +301,12 @@ class PcodeEngine(Engine):
         out: Dict[str, int] = {}
         for register in self.program.getLanguage().getRegisters():
             if register.isProcessorContext() or register.isHidden():
+                continue
+            if not register.isBaseRegister():
+                # Ghidra lists every sub-register too: EAX, AX, AH and AL
+                # are all parts of RAX. Comparing them says nothing the
+                # parent has not already said, and they would swamp the list
+                # of registers only one engine has.
                 continue
             name = register.getName()
             try:
@@ -310,13 +321,33 @@ class PcodeEngine(Engine):
         self.helper.writeRegister(name, BigInteger(str(value)))
 
     def read(self, address: int, size: int) -> bytes:
-        return bytes(self.helper.readMemory(self._address(address), size))
+        """Bytes from the emulator's memory state.
+
+        `EmulatorHelper.readMemory` answers a failure with null rather than
+        an exception, and a *partial* read by filling what it got and
+        logging the rest - it does not say how much. So a short read comes
+        back zero-padded and there is no way to tell from here; compare
+        memory only where the program has actually been.
+        """
+        data = self.helper.readMemory(self._address(address), size)
+        if data is None:
+            raise EngineError(f'nothing mapped at {address:#x} in the p-code '
+                              f'emulator')
+        return bytes(data)
 
     def write(self, address: int, data: bytes) -> None:
         self.helper.writeMemory(self._address(address), bytes(data))
 
     def step(self) -> None:
-        if not self.helper.step(self.monitor):
+        # step() answers an error with false and the reason through
+        # getLastError(), and throws CancelledException if the monitor is
+        # cancelled. Neither is a disagreement, so both become the reason the
+        # comparison stopped.
+        try:
+            stepped = self.helper.step(self.monitor)
+        except Exception as e:
+            raise EngineError(f'p-code step failed: {e}')
+        if not stepped:
             raise EngineError(self.helper.getLastError() or 'p-code step failed')
 
     def disassemble(self, address: int) -> str:

@@ -169,6 +169,24 @@ Each of these has a regression test; do not undo them.
 - **A raw binary gives auto-analysis no entry point**, so the listing comes up
   empty and a symbol export finds nothing. `setup_project.py` disassembles at
   the base and declares `main` first.
+- **JPype cannot extend Java classes**, only implement interfaces with
+  `@JImplements`; it refuses with "Java classes cannot be extended in
+  Python". So no PyGhidra script can subclass `ComponentProvider`,
+  `GhidraScript` or any other Ghidra class, and anything that needs to be a
+  subclass has to be written in Java. `tests/test_ghidra_scripts.py` refuses
+  a script that tries. What *does* work is instantiating Java objects and
+  casting a Python callable to a functional interface with `Interface @ fn`.
+- **Every accessor on a `TraceMemoryRegion` takes the snapshot**:
+  `getRange(snap)`, `isRead(snap)`, `isWrite(snap)`, `isExecute(snap)`. A
+  trace holds the whole history at once, so a region's range and permissions
+  are things it had at a time, not properties of the object.
+- **`EmulatorHelper.readMemory` answers failure with null**, not an
+  exception, and a partial read by filling what it got and logging the rest
+  without saying how much. **`step` throws `CancelledException`** as well as
+  returning false with `getLastError()`.
+- **`Language.getRegisters()` lists every sub-register** - EAX, AX, AH and AL
+  as well as RAX - so anything iterating it wants `isBaseRegister()` unless
+  it means to see all of them.
 - **Driving Ghidra from PyGhidra** needs `Runnable @ fn` casts for
   `Swing.runNow`, the Eclipse and VS Code plugins excluded from the Debugger
   tool template, and `Msg.setErrorDisplay(ConsoleErrorDisplay())` so errors do

@@ -1,10 +1,10 @@
-# A docking window in Ghidra showing the same context the console prints.
+# A window in Ghidra showing the same context the console prints.
 #
 # The connector already prints a gef-style context in the launcher's terminal
 # on every stop: registers with the changed ones highlighted and pointers
 # dereferenced, the decoded status register, disassembly around the program
-# counter, and the stack. This puts the same view in a Ghidra window, so it
-# sits beside the Listing instead of in a terminal you have to switch to.
+# counter, and the stack. This puts the same view in a window, so it sits
+# beside the Listing instead of in a terminal you have to switch to.
 #
 # Nothing new is computed for it. Everything it draws is already in the
 # trace, and the rendering is `ghidraunicorn.context.Context`, which is
@@ -12,14 +12,31 @@
 # list in that file's docstring. `TraceSource` below is the other
 # implementation of that surface, over a Ghidra trace.
 #
+# Why this is a window and not a docked panel
+# -------------------------------------------
+# The roadmap asked for a docking `ComponentProvider`. That cannot be done
+# from Python: `docking.ComponentProvider` is an abstract *class* with an
+# abstract `getComponent()`, Ghidra ships no concrete one to instantiate,
+# and JPype - which is what runs Python inside Ghidra - cannot extend Java
+# classes at all. It refuses with "Java classes cannot be extended in
+# Python"; only interfaces can be implemented, with @JImplements.
+#
+# So a docked version would have to be written in Java, and a Java panel
+# could not call this renderer: it would have to reimplement `context.py`,
+# which is the one thing worth avoiding, because then two views of the same
+# machine could disagree. A floating window that shares the renderer is the
+# better trade, and it is the same picture either way.
+#
+# It refreshes on a timer, so it follows the current trace and snapshot:
+# scrub the Time window and the view follows to that point in history.
+#
 # To use it: Window -> Script Manager, add this directory to the script
-# directories, and run UnicornContextPanel. The window appears in the
-# Debugger tool and follows the current trace and snapshot, so scrubbing the
-# Time window redraws it at that point in history.
+# directories, and run UnicornContextPanel.
 #
 # NOT YET RUN AGAINST A REAL GHIDRA. It was written on a machine that had
-# none. The rendering half is covered by the test suite; what wants checking
-# here is the Ghidra API use - see CHANGELOG.md.
+# none. The rendering half is covered by the test suite, and every Ghidra
+# and JPype call below was checked against Ghidra's own source and against
+# a real JPype - but checked is not run. See CHANGELOG.md.
 #
 # @category Unicorn
 # @menupath Window.Unicorn Context
@@ -28,13 +45,14 @@
 import sys
 import os
 
-from java.awt import BorderLayout, Font
-from javax.swing import JComponent, JPanel, JScrollPane, JTextArea
+from java.awt import BorderLayout, Dimension, Font
+from java.awt.event import ActionListener
+from java.lang import Runnable
+from javax.swing import (BorderFactory, BoxLayout, JButton, JFrame, JPanel,
+                         JScrollPane, JTextArea, Timer, WindowConstants)
 
-from docking import ComponentProvider
 from ghidra.app.services import DebuggerTraceManagerService
-from ghidra.program.model.lang import RegisterValue
-from ghidra.trace.model import Lifespan
+from ghidra.util import Swing
 
 
 def _import_ghidraunicorn():
@@ -95,7 +113,12 @@ class TraceSource(object):
         space = self._register_space()
         language = self.trace.getBaseLanguage()
         for register in language.getRegisters():
-            if register.isProcessorContext():
+            if register.isProcessorContext() or register.isHidden():
+                continue
+            if not register.isBaseRegister():
+                # EAX, AX, AH and AL are all parts of RAX. Reading every one
+                # of them on every redraw buys nothing: the context is drawn
+                # from the table in arch.py, which names the parents.
                 continue
             try:
                 value = space.getValue(self.snap, register)
@@ -166,15 +189,21 @@ class TraceSource(object):
         return bytes(buffer.array())
 
     def regions(self):
+        """What is mapped at this snapshot.
+
+        Every accessor on a region takes the snapshot: a region's range and
+        its permissions are things it had *at a time*, not properties of the
+        object, because a trace holds the whole history at once.
+        """
         out = []
         for region in self.trace.getMemoryManager().getRegionsAtSnap(self.snap):
-            span = region.getRange()
+            span = region.getRange(self.snap)
             perms = 0
-            if region.isRead():
+            if region.isRead(self.snap):
                 perms |= 1
-            if region.isWrite():
+            if region.isWrite(self.snap):
                 perms |= 2
-            if region.isExecute():
+            if region.isExecute(self.snap):
                 perms |= 4
             out.append((span.getMinAddress().getOffset(),
                         span.getMaxAddress().getOffset(), perms))
@@ -216,49 +245,99 @@ class TraceSource(object):
         return None
 
 
-class UnicornContextProvider(ComponentProvider):
-    """The window itself: a monospaced text area, redrawn on demand."""
+class ContextWindow(object):
+    """A monospaced text area in a frame, redrawn from the current trace.
 
-    def __init__(self, tool, owner):
-        ComponentProvider.__init__(self, tool, 'Unicorn Context', owner)
+    Plain composition, no subclassing: every Java object here is one JPype
+    can build, and the two callbacks are cast to Java functional interfaces
+    with the `Interface @ function` idiom that `tools/e2e_ghidra.py` already
+    uses for `Swing.runNow`.
+    """
+
+    REFRESH_MS = 1000
+
+    def __init__(self, tool):
         self.tool = tool
+        self.frame = None
+        self.text = None
+        self.timer = None
+
+    def open(self):
+        # Swing objects belong to the event dispatch thread, and a Ghidra
+        # script does not run on it.
+        Swing.runNow(Runnable @ self._build)
+        self.refresh()
+        return self
+
+    def _build(self):
         self.text = JTextArea()
         self.text.setEditable(False)
         self.text.setFont(Font(Font.MONOSPACED, Font.PLAIN, 12))
-        self.panel = JPanel(BorderLayout())
-        self.panel.add(JScrollPane(self.text), BorderLayout.CENTER)
-        self.setVisible(True)
 
-    def getComponent(self):
-        return self.panel
+        refresh = JButton('Refresh')
+        refresh.addActionListener(ActionListener @ (lambda event: self.refresh()))
+        buttons = JPanel()
+        buttons.setLayout(BoxLayout(buttons, BoxLayout.LINE_AXIS))
+        buttons.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4))
+        buttons.add(refresh)
+
+        panel = JPanel(BorderLayout())
+        panel.add(JScrollPane(self.text), BorderLayout.CENTER)
+        panel.add(buttons, BorderLayout.SOUTH)
+
+        self.frame = JFrame('Unicorn Context')
+        self.frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE)
+        self.frame.setContentPane(panel)
+        self.frame.setPreferredSize(Dimension(900, 700))
+        self.frame.pack()
+        self.frame.setVisible(True)
+
+        self.timer = Timer(self.REFRESH_MS,
+                           ActionListener @ (lambda event: self._tick()))
+        self.timer.start()
+
+    def _tick(self):
+        # Nothing stops the timer when the window is closed, so it stops
+        # itself rather than redrawing something nobody can see.
+        if self.frame is None or not self.frame.isDisplayable():
+            if self.timer is not None:
+                self.timer.stop()
+            return
+        self.refresh()
 
     def refresh(self):
         try:
-            self.text.setText(self._render())
+            text = self.render()
         except Exception as e:
-            self.text.setText('no context: %s' % (e,))
-        self.text.setCaretPosition(0)
+            text = 'no context: %s: %s' % (type(e).__name__, e)
+        if self.text is None:
+            return
+        if str(self.text.getText()) == text:
+            return          # do not fight the scrollbar for no reason
+        position = self.text.getCaretPosition()
+        self.text.setText(text)
+        try:
+            self.text.setCaretPosition(min(position, len(text)))
+        except Exception:
+            pass
 
-    def _render(self):
+    def render(self):
         traces = self.tool.getService(DebuggerTraceManagerService)
         if traces is None:
-            return 'no trace manager; open this in the Debugger tool'
+            return 'no trace manager: run this in the Debugger tool'
         coordinates = traces.getCurrent()
         trace = coordinates.getTrace()
         if trace is None:
             return 'no trace: launch a target first'
         source = TraceSource(trace, coordinates.getSnap(),
-                             coordinates.getThread())
-        # No colour: a JTextArea shows escape codes rather than obeying them.
+                             coordinates.getThread(), coordinates.getFrame())
+        # No colour: a JTextArea prints escape codes rather than obeying them.
         return context.Context(source, color=False).render()
 
 
 def run():
-    tool = state.getTool()
-    provider = UnicornContextProvider(tool, 'ghidra-unicorn')
-    tool.addComponentProvider(provider, True)
-    provider.refresh()
-    print('Unicorn Context panel added. Re-run this script to redraw it.')
+    ContextWindow(state.getTool()).open()
+    print('Unicorn Context window opened; it follows the current trace.')
 
 
 run()

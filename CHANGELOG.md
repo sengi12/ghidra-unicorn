@@ -25,7 +25,18 @@ Notable changes to ghidra-unicorn. The format follows
   be identical, which is what keeps the two from drifting. The one real
   coupling it flushed out is fixed: the renderer caught Unicorn's own
   exception when a read ran off the end of a mapping, which nothing but
-  Unicorn could have raised. **Not yet run against a real Ghidra.**
+  Unicorn could have raised.
+
+  It is a floating window rather than the docked `ComponentProvider` the
+  roadmap asked for, because that cannot be written in Python at all:
+  `ComponentProvider` is an abstract class, Ghidra ships no concrete one,
+  and JPype refuses to extend Java classes - "Java classes cannot be
+  extended in Python". A docked panel would have to be Java, and Java could
+  not call this renderer, so it would have to reimplement it and the two
+  views of one machine could then disagree. A test now refuses any Ghidra
+  script that subclasses a Java class, so the mistake cannot come back.
+  **Still not run against a real Ghidra**, though every Ghidra and JPype
+  call has been checked against their sources.
 
 - **Differential execution against Ghidra's p-code emulator**, in
   `differential.py`: both engines are put in the same state, stepped in

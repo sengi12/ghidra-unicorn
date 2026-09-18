@@ -343,11 +343,16 @@ newlines and semicolons, quotes are respected, and `#` starts a comment.
 ## A context panel in Ghidra
 
 `ghidra_scripts/UnicornContextPanel.py` puts the same view the console
-prints into a docking window beside the Listing: registers with pointers
+prints into a window beside the Listing: registers with pointers
 dereferenced, the decoded status register, disassembly and the stack. Add
 this repository's `ghidra_scripts` directory in the Script Manager and run
-it. It draws from the trace, so it follows the Time window: scrub back and
-the panel shows that point in history.
+it. It draws from the trace and refreshes on a timer, so it follows the Time
+window: scrub back and it shows that point in history.
+
+It is a floating window rather than a docked panel because JPype cannot
+extend Java classes and Ghidra's `ComponentProvider` is one; docking would
+mean writing it in Java and reimplementing the renderer, which is the one
+thing worth avoiding.
 
 Not yet run against a real Ghidra - see [CHANGELOG.md](CHANGELOG.md).
 
