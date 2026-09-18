@@ -37,6 +37,7 @@ from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
 from unicorn import unicorn_const as _uc_const
 
 from .arch import ArchSpec, spec_for_uc
+from .effects import EffectLog
 from .timeline import DEFAULT_BUDGET, DEFAULT_INTERVAL, Timeline
 
 PAGE = 0x1000
@@ -117,6 +118,7 @@ class UnicornTarget:
         self._temp: Set[int] = set()
         self._running = False
         self._first = False
+        self._halting = False
         self._stop: Optional[StopEvent] = None
         self._pending: Optional[StopEvent] = None
         self._lock = threading.Lock()
@@ -129,9 +131,20 @@ class UnicornTarget:
         self._cs = None
         self.timeline = Timeline(uc, interval=checkpoint_interval,
                                  budget=memory_budget, enabled=record)
+        self.timeline.on_forget = self._on_history_forgotten
         self._replaying = False
+        self._replay_icount = 0    # instruction index reached by a replay
         self._left = -1            # instructions left in this run; -1 is all
         self._trace: Optional[List[int]] = None
+        #: Every layer that stands in for code that is not here keeps a log
+        #: of what it did, so a replay can put it back rather than do it
+        #: again. They are rewound and pruned with the history; see
+        #: effects.py.
+        self.effect_logs: List['EffectLog'] = []
+        #: Set by `syscalls.install`; None means traps are left to Unicorn.
+        self.syscalls = None
+        #: Set by `stubs.install`; None means no function is stood in for.
+        self.stubs = None
         self._write_hook = (uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
                             if record else None)
 
@@ -159,22 +172,31 @@ class UnicornTarget:
             return f.get(self.uc.reg_read(self.spec.reg(f.source).uc))
         return self.uc.reg_read(self.spec.reg(name).uc)
 
-    def reg_write(self, name: str, value: int) -> None:
+    def reg_write(self, name: str, value: int, external: bool = True) -> None:
+        """Write a register. `external` says whether a replay reproduces it.
+
+        The same distinction `write` makes: an edit made through the debugger
+        has to be checkpointed because re-running the instructions will not
+        put it back, while a register a system call handler sets as part of
+        executing the trap is replayed with the rest of that call's effects.
+        Checkpointing the latter would also mean calling `context_save` from
+        inside a hook on every system call, and during a replay it would
+        append a checkpoint for an instruction that has already happened.
+        """
         rf = self._field(name)
         if rf is not None:
             cur = self.uc.reg_read(rf[0].uc)
             self.uc.reg_write(rf[0].uc, rf[1].set(cur, value))
+        else:
+            f = self.spec.flag(name)
+            if f is not None:
+                src = self.spec.reg(f.source)
+                cur = self.uc.reg_read(src.uc)
+                self.uc.reg_write(src.uc, f.set(cur, int(value)))
+            else:
+                self.uc.reg_write(self.spec.reg(name).uc, value)
+        if external:
             self.timeline.note_external_change()
-            return
-        f = self.spec.flag(name)
-        if f is not None:
-            src = self.spec.reg(f.source)
-            cur = self.uc.reg_read(src.uc)
-            self.uc.reg_write(src.uc, f.set(cur, int(value)))
-            self.timeline.note_external_change()
-            return
-        self.uc.reg_write(self.spec.reg(name).uc, value)
-        self.timeline.note_external_change()
 
     def fields(self) -> List[Tuple[str, str]]:
         """Decoded fields of the status register, MSB first."""
@@ -212,12 +234,21 @@ class UnicornTarget:
     def read(self, address: int, size: int) -> bytes:
         return bytes(self.uc.mem_read(address, size))
 
-    def write(self, address: int, data: bytes) -> None:
+    def write(self, address: int, data: bytes, external: bool = True) -> None:
+        """Write memory. `external` says whether a replay can reproduce it.
+
+        A write made through the debugger happens between instructions and
+        re-running the instruction stream will not put it back, so the only
+        way to keep it is to checkpoint the state it made. A write made by
+        something inside the emulation - a system call handler - *is*
+        reproduced, because the syscall layer replays its recorded effects,
+        so it only needs its pages marked dirty like any other.
+        """
         self.uc.mem_write(address, data)
-        # The memory hook only sees the program's own writes, and this one is
-        # not in the instruction stream a replay re-runs, so the timeline has
-        # to checkpoint it.
-        self.timeline.note_external_write(address, len(data))
+        if external:
+            self.timeline.note_external_write(address, len(data))
+        else:
+            self.timeline.note_write(address, len(data))
 
     def read_mapped(self, start: int, end: int) -> List[Tuple[int, bytes]]:
         """Read [start, end) clipped to mapped regions; returns chunks."""
@@ -279,18 +310,26 @@ class UnicornTarget:
         if self._replaying:
             # Re-running history: no breakpoints, no exits, no counting, and
             # no stop event. Only the instruction limit applies.
+            self._halting = False
             if self._left == 0:
+                self._halting = True
                 uc.emu_stop()
                 return
             self._left -= 1
+            # Mirror the instruction counting the normal path does, so that
+            # `executing_icount` names the same instruction either way and a
+            # system call can find the effects it recorded the first time.
+            self._replay_icount += 1
             if self._trace is not None:
                 self._trace.append(address)
             return
+        self._halting = False
         if self._pending is not None:
             # A watchpoint fired during the previous instruction. That
             # instruction has now completed, so stop here, before this one.
             self._stop = self._pending
             self._pending = None
+            self._halting = True
             uc.emu_stop()
             return
         if self._first:
@@ -304,12 +343,14 @@ class UnicornTarget:
         # stop without ever noticing we had arrived.
         if address in self.exits or (self.end is not None and address == self.end):
             self._stop = StopEvent('exit', address, f'Reached exit {address:#x}')
+            self._halting = True
             uc.emu_stop()
             return
         if self._left == 0:
             # Unicorn's own instruction count overruns after a context_restore
             # - it will happily run a whole basic block for a count of one -
             # so the limit is enforced here, where a stop is exact.
+            self._halting = True
             uc.emu_stop()
             return
         bp = self._bp_by_addr.get(address)
@@ -317,12 +358,18 @@ class UnicornTarget:
             bp.hit_count += 1
             self._stop = StopEvent('breakpoint', address,
                                    f'Breakpoint {bp.num} at {address:#x}', bp)
+            self._halting = True
             uc.emu_stop()
             return
         # Nothing stopped us, so this instruction is about to run: the state we
         # are in now is the state at `timeline.icount`.
         self.timeline.note_instruction()
         self._left -= 1
+
+    def _on_history_forgotten(self, earliest: int) -> None:
+        """The history no longer reaches back as far as it did."""
+        for log in self.effect_logs:
+            log.forget_before(earliest)
 
     def _on_invalid(self, uc, access, address, size, value, user_data) -> bool:
         """Remember the access Unicorn is about to refuse.
@@ -357,6 +404,47 @@ class UnicornTarget:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def halting(self) -> bool:
+        """True when the code hook has decided this instruction will not run.
+
+        Hooks fire in the order they were added and the target's own code
+        hook is always first, so by the time anything else hooked to the same
+        address runs, this says whether that address is about to execute or
+        is being stopped at. A function stub has to ask: a breakpoint on a
+        stubbed function should stop *before* the stub stands in for it,
+        not after it has already returned.
+        """
+        return self._halting
+
+    @property
+    def replaying(self) -> bool:
+        """True while history is being re-run, when nothing may be reported."""
+        return self._replaying
+
+    @property
+    def executing_icount(self) -> int:
+        """Index of the instruction executing now; only valid inside a hook.
+
+        The code hook counts an instruction *before* it runs, so during the
+        instruction the count is one past it. A replay keeps its own count
+        because the timeline's does not move while history is re-run.
+        """
+        counted = self._replay_icount if self._replaying else self.timeline.icount
+        return counted - 1
+
+    def request_stop(self, reason: str, description: str) -> None:
+        """End the current run with a given verdict, from inside a hook.
+
+        This is how something that is not a breakpoint - an `exit` system
+        call, say - reports why the program stopped. A replay is silent, so
+        it is ignored there.
+        """
+        if self._replaying:
+            return
+        self._stop = StopEvent(reason, self.pc(), description)
+        self.uc.emu_stop()
 
     def _start_pc(self) -> int:
         pc = self.pc()
@@ -543,6 +631,8 @@ class UnicornTarget:
         """The timeline's restore, plus the flag fix-up below."""
         cp = self.timeline.restore(icount)
         self._resync_status()
+        # A replay starting here is at the checkpoint's instruction.
+        self._replay_icount = cp.icount
         return cp
 
     def _resync_status(self) -> None:
@@ -585,6 +675,12 @@ class UnicornTarget:
         if k < was and self.terminated:
             self.terminated = False
             self.exit_description = ''
+        # We are at k and the only way forward is to execute again, so
+        # anything recorded past here describes a future that no longer
+        # exists. Dropping it now keeps a re-run from replaying it, and puts
+        # back the state those layers had before it.
+        for log in self.effect_logs:
+            log.truncate(k)
 
     def _history_pcs(self, lo: int, hi: int) -> Dict[int, int]:
         """The PC at each instruction in [lo, hi], by replaying from the

@@ -9,6 +9,51 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **System calls.** `syscalls.py` puts a small Linux under the emulator, so a
+  program that traps into a kernel gets an answer instead of a fault: `read`,
+  `write`, `writev`, `open`, `openat`, `close`, `lseek`, `mmap`, `mmap2`,
+  `munmap`, `brk`, `getpid`, `exit` and `exit_group`, with the call numbers
+  and argument registers of every Linux architecture here - x86, x86-64, ARM,
+  ARM64, MIPS o32 and n64, RISC-V, PowerPC and m68k - in `abi.py` beside the
+  calling conventions. Errors come back the way each architecture reports
+  them: a negative result, MIPS's separate flag register, or PowerPC's CR0
+  summary-overflow bit. There is no host filesystem: `open` sees only the
+  files the harness handed over, so pointing the debugger at a crashing input
+  cannot reach the debugging machine's own files. A handler can be replaced or
+  added by name without touching the number tables. `--syscalls`,
+  `--stdin` and `--trace-calls` on the command line, the same as
+  `OPT_SYSCALLS`, `OPT_STDIN` and `OPT_TRACE_CALLS` in the launcher, and `sys`
+  in the console.
+
+- **Function stubs.** `stubs.py` stands in for library functions the binary
+  calls but does not contain: `malloc`, `calloc`, `realloc`, `free`, the
+  `mem*` and `str*` family, `puts`, `putchar`, `exit` and `abort`. A stub is a
+  code hook on the function's entry address that reads the arguments where the
+  architecture's C calling convention puts them, does the work in Python and
+  writes the return address into the program counter, so the function's own
+  instructions never run and it does not matter that they are not there.
+  `malloc` allocates from an arena mapped on demand, with a free list that
+  does not immediately recycle the most recent block, so a use-after-free
+  still reads the bytes it had. `--symbols` binds every implementation the
+  symbol table has an address for; `stub NAME ADDR` in the console binds one
+  by hand, and `stubs` and `heap` show what is bound and what has been handed
+  out. A breakpoint on a stubbed function still stops before the stub stands
+  in for it.
+
+  Both layers are on by default, opt out per run or per harness, and both are
+  correct under reverse execution - which is the hard part, and is what
+  `effects.py` is for. A system call is not a pure function of the machine
+  state and a stub skips instructions entirely, so re-running either during a
+  replay would consume the input twice, print twice, hand out a second block,
+  or walk into code the first pass never executed. Each one therefore runs
+  once and records what it did - memory written, regions mapped, registers
+  set, output produced, and whether it ended the program - and a replay
+  applies the record instead of doing it again. Going back before a call puts
+  back the layer's own state as well, so the file offset, the break and the
+  allocator rewind with the machine and running forward again reads the same
+  bytes and returns the same address. The log is pruned as the history folds,
+  so it costs nothing the history is not paying for already.
+
 - **Reverse execution.** The processor context is checkpointed every few
   thousand instructions, along with only the pages written since the previous
   checkpoint, so stepping backwards means restoring the nearest checkpoint and
@@ -89,6 +134,17 @@ Notable changes to ghidra-unicorn. The format follows
   `--symbols-at`.
 
 ### Fixed
+
+- **Reverse execution rewinds a mapping.** Restoring a checkpoint mapped back
+  the regions it had and left alone any that had appeared since, so a region
+  mapped after the checkpoint survived a rewind to before it existed and the
+  program found memory it had not allocated yet. Every checkpoint now carries
+  the region list - what is mapped is part of the state - and restoring makes
+  the region set match exactly, unmapping what should not be there and
+  mapping back what should. A region that only partly overlaps is taken down
+  whole and the wanted pieces put back, which also puts right a region that
+  was split or merged since. This was a corner case while nothing could map
+  memory; with `mmap` and a growing `brk` under the emulator it is not.
 
 - **Stepping toward an end address that is a branch delay slot no longer
   loops forever.** The end was handed to Unicorn as a stop address even when

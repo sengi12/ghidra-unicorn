@@ -59,6 +59,21 @@ def build_parser() -> argparse.ArgumentParser:
                         '(OPT_SYMBOLS_AT)')
     p.add_argument('--regs', default=_env('OPT_REGS'),
                    help='initial register overrides, e.g. "cpsr=0x60000030,r0=1" (OPT_REGS)')
+    p.add_argument('--syscalls', default=_env('OPT_SYSCALLS', 'true'),
+                   help='service the program\'s system calls with a small '
+                        'Linux layer instead of faulting on the trap '
+                        '(OPT_SYSCALLS)')
+    p.add_argument('--stubs', default=_env('OPT_STUBS', 'true'),
+                   help='stand in for malloc, free and the common string and '
+                        'memory functions, at the addresses --symbols gives '
+                        'them (OPT_STUBS)')
+    p.add_argument('--stdin', default=_env('OPT_STDIN'),
+                   help='file whose contents the program reads from its '
+                        'standard input (OPT_STDIN)')
+    p.add_argument('--trace-calls', action='store_true',
+                   default=_bool(_env('OPT_TRACE_CALLS'), False),
+                   help='print every system call and stub as it happens '
+                        '(OPT_TRACE_CALLS)')
     p.add_argument('--preload', default=_env('OPT_PRELOAD', 'true'),
                    help='copy all mapped memory into the trace at launch (OPT_PRELOAD)')
     p.add_argument('--preload-cap', type=int, default=32 * 1024 * 1024,
@@ -138,6 +153,9 @@ def main(argv=None) -> int:
           f'pc={target.pc():#x} sp={target.sp():#x}, '
           f'{len(target.regions())} regions, {len(loaded.modules)} modules', flush=True)
 
+    symbols = _symbols(args)
+    _install_layers(args, loaded, symbols)
+
     if args.listen is not None:
         commands.listen(args.listen)
     else:
@@ -150,7 +168,6 @@ def main(argv=None) -> int:
     commands.activate()
     print('Trace started. Ghidra is now driving the emulator.', flush=True)
 
-    symbols = _symbols(args)
     if args.no_repl or not sys.stdin.isatty():
         _wait_for_disconnect()
     else:
@@ -158,6 +175,40 @@ def main(argv=None) -> int:
         UnicornConsole(target, loaded, symbols=symbols).run()
     commands.disconnect()
     return 0
+
+
+def _program_output(stream: int, data: bytes) -> None:
+    """What the emulated program printed. Its standard error is marked so it
+    is not mistaken for the connector's own."""
+    text = data.decode('utf-8', 'replace')
+    sys.stdout.write(text if stream == 1 else f'[stderr] {text}')
+    sys.stdout.flush()
+
+
+def _install_layers(args, loaded, symbols):
+    """Put a system call layer and function stubs under the target."""
+    stdin = b''
+    if args.stdin:
+        try:
+            with open(args.stdin, 'rb') as f:
+                stdin = f.read()
+        except OSError as e:
+            print(f'could not read {args.stdin}: {e}', flush=True)
+    installed = loaders.install_layers(
+        loaded, syscalls=_bool(args.syscalls, True), stubs=_bool(args.stubs, True),
+        symbols=symbols, stdin=stdin, on_output=_program_output,
+        trace=args.trace_calls)
+    sys_layer = installed.get('syscalls')
+    if sys_layer is not None:
+        print(f'System calls: a small Linux for {loaded.target.spec.key}'
+              + (f', {len(stdin)} bytes on standard input' if stdin else ''), flush=True)
+    elif _bool(args.syscalls, True):
+        print(f'System calls: none for {loaded.target.spec.key}; a trap will '
+              f'stop the target', flush=True)
+    stub_layer = installed.get('stubs')
+    if stub_layer is not None and stub_layer.bound:
+        print(f'Stubs: {", ".join(sorted(set(stub_layer.bound.values())))}', flush=True)
+    return installed
 
 
 def _symbols(args):

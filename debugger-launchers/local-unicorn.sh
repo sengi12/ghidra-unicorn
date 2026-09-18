@@ -30,6 +30,10 @@
 #@env OPT_SYMBOLS:file="" "Symbols" "JSON from tools/export_symbols.py: names for addresses, and `b main` in the console."
 #@env OPT_SYMBOLS_AT:str="" "Symbols base" "Rebase those symbols so their image base lands at this address (hex)."
 #@env OPT_REGS:str="" "Registers" "Initial register overrides, e.g. cpsr=0x60000030,r0=1 (flags like ZF=1 work too)."
+#@env OPT_SYSCALLS:bool=true "System calls" "Service the program's system calls with a small Linux layer (read, write, open, mmap, brk, exit) instead of faulting on the trap."
+#@env OPT_STDIN:file="" "Standard input" "File whose contents the program reads from file descriptor 0. No other host file is visible to it."
+#@env OPT_STUBS:bool=true "Function stubs" "Stand in for malloc, free and the common string and memory functions, at the addresses the symbols give them."
+#@env OPT_TRACE_CALLS:bool=false "Trace calls" "Print every system call and stub as it happens."
 #@env OPT_PRELOAD:bool=true "Preload memory" "Copy all mapped memory into the trace at launch (capped at 32 MiB)."
 #@env OPT_PYTHON_EXE:file="python3" "python command" "Python 3 with unicorn (and protobuf) installed. Omit the path to resolve using PATH."
 

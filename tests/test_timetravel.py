@@ -373,3 +373,48 @@ def test_ghidra_reverse_methods_drive_the_target():
         assert 'history only reaches back to 0' in str(e.value)
     finally:
         commands.STATE.loaded = None
+
+
+# ---- what is mapped is part of the state ----------------------------------
+
+def regions_of(t):
+    return [start for start, _, _ in t.regions()]
+
+
+def test_a_region_mapped_after_a_checkpoint_goes_away_on_the_way_back():
+    """The mapping bug: extra regions used to survive a rewind.
+
+    Only missing regions were mapped back, so a region that appeared after
+    the checkpoint stayed mapped when the machine went back to before it
+    existed, and the programme found memory it had not allocated yet.
+    """
+    t = make_tt(interval=100)          # one checkpoint, at instruction 0
+    t.step(2)
+    t.uc.mem_map(0x9000, 0x1000)
+    t.step(2)
+    assert 0x9000 in regions_of(t)
+    t.goto_icount(0)
+    assert 0x9000 not in regions_of(t)
+
+
+def test_a_region_unmapped_later_comes_back_with_its_contents():
+    """The other direction, and the one that already worked: a region the
+    state had and the machine no longer has is mapped back, with the bytes
+    that were in it.
+
+    An external change is checkpointed at the instruction it happens at, so
+    the unmap below belongs to instruction 3 and instruction 1 is before it.
+    """
+    t = make_tt(interval=100)
+    t.step(1)                           # base checkpoint at 0, without 0x9000
+    t.uc.mem_map(0x9000, 0x1000)
+    t.write(0x9000, b'kept')            # checkpoint at 1, with it
+    t.step(2)
+    t.uc.mem_unmap(0x9000, 0x1000)
+    t.timeline.note_external_change()   # checkpoint at 3, without it again
+    assert 0x9000 not in regions_of(t)
+    t.goto_icount(1)
+    assert 0x9000 in regions_of(t)
+    assert t.read(0x9000, 4) == b'kept'
+    t.goto_icount(0)
+    assert 0x9000 not in regions_of(t)

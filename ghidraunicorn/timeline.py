@@ -29,7 +29,7 @@ that later instruction. Everything after it is still restorable and everything
 before it is gone for good - `earliest` says where the history now begins.
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from unicorn import Uc, UcError
 
@@ -50,7 +50,11 @@ class Checkpoint:
     icount: int
     context: object
     pages: Dict[int, bytes] = field(default_factory=dict)
-    regions: Optional[List[Tuple[int, int, int]]] = None   # base only
+    #: Every checkpoint carries the whole region list, not just the base:
+    #: what is mapped is part of the state, and a region that appeared after
+    #: the base has to disappear again on the way back to before it existed.
+    #: It is a handful of tuples, so it is not worth a delta.
+    regions: Optional[List[Tuple[int, int, int]]] = None
 
     @property
     def nbytes(self) -> int:
@@ -71,6 +75,11 @@ class Timeline:
         self.dirty: Set[int] = set()
         self.dropped = 0                             # checkpoints folded away
         self._next: int = 0                          # icount of the next checkpoint
+        #: Called with the new `earliest` whenever folding moves the start of
+        #: the history forward. Anything else that keeps state per instruction
+        #: - the system call log - uses it to drop what can no longer be
+        #: reached, instead of waiting until it is next written to.
+        self.on_forget: Optional[Callable[[int], None]] = None
 
     # ---- recording -------------------------------------------------------
 
@@ -121,13 +130,14 @@ class Timeline:
 
     def checkpoint(self) -> Checkpoint:
         """Snapshot the state we are in now, at the current instruction."""
+        regions = list(sorted(self.uc.mem_regions()))
         if self.base is None:
             cp = Checkpoint(self.icount, self.uc.context_save(),
-                            self._read_all(), list(sorted(self.uc.mem_regions())))
+                            self._read_all(), regions)
             self.base = cp
         else:
             cp = Checkpoint(self.icount, self.uc.context_save(),
-                            self._read_pages(self.dirty))
+                            self._read_pages(self.dirty), regions)
             self.checkpoints.append(cp)
         self.dirty = set()
         self._next = self.icount + self.interval
@@ -160,6 +170,7 @@ class Timeline:
 
     def _enforce_budget(self) -> None:
         total = self.nbytes
+        folded = False
         while self.checkpoints and total > self.budget:
             cp = self.checkpoints.pop(0)
             total -= cp.nbytes
@@ -168,7 +179,12 @@ class Timeline:
             base.pages.update(cp.pages)       # the base becomes a snapshot of cp
             base.context = cp.context
             base.icount = cp.icount
+            if cp.regions is not None:
+                base.regions = cp.regions
             self.dropped += 1
+            folded = True
+        if folded and self.on_forget is not None:
+            self.on_forget(self.earliest)
 
     # ---- querying --------------------------------------------------------
 
@@ -222,7 +238,9 @@ class Timeline:
         cp = self.checkpoint_at_or_before(icount)
         base = self.base
         assert base is not None
-        self._remap(base.regions or [])
+        # What is mapped comes first: the pages below are written into it, and
+        # a page whose region no longer existed then has nowhere to land.
+        self._sync_regions(cp.regions if cp.regions is not None else base.regions or [])
         for addr, data in base.pages.items():
             try:
                 self.uc.mem_write(addr, data)
@@ -239,17 +257,36 @@ class Timeline:
         self.uc.context_restore(cp.context)
         return cp
 
-    def _remap(self, regions) -> None:
-        """Map back anything the snapshot had that is not mapped now."""
+    def _sync_regions(self, regions) -> None:
+        """Make what is mapped match `regions` exactly.
+
+        Mapping back what a snapshot had is only half of it: a region the
+        program mapped *after* the snapshot has to go away again, or going
+        back to before it existed leaves it behind and the program finds
+        memory it has not allocated yet. With system calls under the
+        emulator that is no longer a corner case - every `mmap` and every
+        `brk` that grows the heap makes one.
+
+        A region that only partly overlaps one of `regions` is unmapped
+        whole and the wanted pieces are mapped back, which is also how a
+        region that was split or merged since gets put right.
+        """
         if not regions:
             return
+        want = {(s, e): p for s, e, p in regions}
+        for start, end, _ in list(self.uc.mem_regions()):
+            if (start, end) not in want:
+                try:
+                    self.uc.mem_unmap(start, end - start + 1)
+                except UcError:
+                    pass
         have = {(s, e) for s, e, _ in self.uc.mem_regions()}
-        for start, end, perms in regions:
+        for (start, end), perms in want.items():
             if (start, end) not in have:
                 try:
                     self.uc.mem_map(start, end - start + 1, perms)
                 except UcError:
-                    pass       # already mapped, or overlapping something newer
+                    pass       # overlaps something we could not take down
 
     # ---- reporting -------------------------------------------------------
 

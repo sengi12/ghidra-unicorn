@@ -44,6 +44,9 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   cov on|off|save PATH   record basic blocks and write drcov for ghidra-aflcov
   prov on [BASE LEN]     watch the input buffer; `prov` reports what was read
   sym NAME|ADDR          look a symbol up in either direction
+  sys [N]                the system call layer, and the last N calls
+  stub [NAME ADDR]       list the stubbed functions, or stand in for one
+  heap                   blocks the stubbed malloc has handed out
   m, set ADDR HEXBYTES   write bytes, e.g. m 0x3000 41424344
   ctx, context           print the context again
   k, kill                terminate the target
@@ -148,6 +151,9 @@ class UnicornConsole(code.InteractiveConsole):
             'cov': self.cmd_coverage, 'coverage': self.cmd_coverage,
             'prov': self.cmd_provenance, 'provenance': self.cmd_provenance,
             'sym': self.cmd_symbol, 'symbol': self.cmd_symbol,
+            'sys': self.cmd_syscalls, 'syscalls': self.cmd_syscalls,
+            'stub': self.cmd_stubs, 'stubs': self.cmd_stubs,
+            'heap': self.cmd_heap,
         }
         self.quit = False
         self._readline = None
@@ -271,6 +277,54 @@ class UnicornConsole(code.InteractiveConsole):
             from .target import StopEvent
             hooks.on_stop(StopEvent('exit', t.pc(), 'Killed'))
             self.write('target killed\n')
+
+    # ---- standing in for what is not there -------------------------------
+
+    def cmd_syscalls(self, args: List[str]) -> None:
+        layer = self.target.syscalls
+        if layer is None:
+            self.write('no system call layer: the target traps straight to a '
+                       'fault (launch with --syscalls, or the architecture '
+                       'has no table)\n')
+            return
+        self.write(layer.describe() + '\n')
+        recent = layer.records[-(int(args[1], 0) if len(args) > 1 else 10):]
+        for rec in recent:
+            self.write(f'  {rec.icount:>10}  {rec.describe()}\n')
+        if not recent:
+            self.write('  nothing called yet\n')
+
+    def cmd_stubs(self, args: List[str]) -> None:
+        layer = self.target.stubs
+        if layer is None:
+            self.write('no stub layer (launch with --stubs)\n')
+            return
+        if len(args) >= 3:
+            name, address = args[1], self.value(args[2])
+            layer.bind(name, address)
+            self.write(f'{name} stands in at {address:#x}\n')
+            return
+        if len(args) == 2:
+            raise ValueError('usage: stub NAME ADDR')
+        self.write(layer.describe() + '\n')
+        for address, name in sorted(layer.bound.items()):
+            self.write(f'  {address:#012x}  {name}  '
+                       f'(called {layer.calls.get(name, 0)}x)\n')
+        if not layer.bound:
+            self.write('  nothing bound; `stub malloc 0x401000` binds one, and '
+                       '--symbols binds them all at launch\n')
+
+    def cmd_heap(self, args: List[str]) -> None:
+        layer = self.target.stubs
+        if layer is None:
+            self.write('no stub layer, so no heap\n')
+            return
+        heap = layer.heap
+        self.write(heap.describe() + '\n')
+        for block in sorted(heap.blocks.values(), key=lambda b: b.address):
+            self.write(f'  {block.address:#012x}  {block.size:>8} bytes  live\n')
+        for block in sorted(heap.freed.values(), key=lambda b: b.address):
+            self.write(f'  {block.address:#012x}  {block.size:>8} bytes  freed\n')
 
     # ---- breakpoints -----------------------------------------------------
 

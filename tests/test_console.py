@@ -170,3 +170,44 @@ def test_provenance_command_reports_reads():
     c.push('prov')
     text = out.getvalue()
     assert 'read:   0-7' in text and 'unread: 8-15' in text
+
+
+# ---- standing in for what is not there ------------------------------------
+
+def test_console_reports_when_there_is_no_layer():
+    t, c, out = make_console()
+    c.push('sys')
+    c.push('stub')
+    c.push('heap')
+    text = out.getvalue()
+    assert 'no system call layer' in text
+    assert 'no stub layer' in text and 'no heap' in text
+
+
+def test_console_shows_the_system_call_layer():
+    from ghidraunicorn import syscalls
+    t, c, out = make_console()
+    layer = syscalls.install(t)
+    c.push('sys')
+    assert 'x64 Linux' in out.getvalue()
+    assert 'nothing called yet' in out.getvalue()
+
+
+def test_console_binds_and_lists_a_stub():
+    from ghidraunicorn import stubs
+    t, c, out = make_console()
+    stubs.install(t)
+    c.push('stub malloc 0x1027')
+    assert 'malloc stands in at 0x1027' in out.getvalue()
+    c.push('stub')
+    assert '0x1027' in out.getvalue() and 'malloc' in out.getvalue()
+    c.push('heap')
+    assert 'heap 0x' in out.getvalue()
+
+
+def test_console_refuses_a_half_given_stub():
+    from ghidraunicorn import stubs
+    t, c, out = make_console()
+    stubs.install(t)
+    c.push('stub malloc')
+    assert 'usage: stub NAME ADDR' in out.getvalue()

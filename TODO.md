@@ -7,12 +7,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Syscall and function stubs.** Dispatch `syscall` / `svc` / `sc` to
-  Python handlers, with a small Linux layer for read, write, mmap, brk and
-  exit. Add symbol-driven stubs for malloc, free and the common string and
-  memory functions; afl-unicorn's loader already carries a simple heap to
-  lift. This is the biggest practical limit today: anything that leaves the
-  binary has to be stubbed.
 - [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
   model already carries Condition and Ignore Count; populate them and
   evaluate a Python predicate in the hook.
@@ -43,9 +37,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Known bugs
 
-- [ ] **Reverse execution cannot rewind a mapping.** A region mapped after
-  the base checkpoint stays mapped when you go back to before it existed.
-  Missing regions are restored; extra ones are not unmapped.
 - [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
   hits, and it does not adjust hit counts as it passes them.
 - [ ] **Step-over backwards replays the whole retained history** to work out
@@ -54,6 +45,9 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 Fixed, kept here until the next release notes ship:
 
+- [x] A region mapped after a checkpoint survived a rewind to before it
+  existed, because restoring mapped missing regions back but never unmapped
+  extra ones.
 - [x] A flag register had to be exactly one bit, which kept m68k's interrupt
   level and PowerPC's `xer_count` out of the Registers window.
 - [x] A stop forced by an unrelated hook was reported as termination when an
@@ -71,5 +65,13 @@ worth stating.
 - One thread and one frame. Unicorn has no threads, and Ghidra unwinds the
   stack itself from the registers and memory the connector publishes.
 - Step-over needs Capstone to recognise a call; without it, it steps into.
-- No operating system. A harness has to map its own memory and either avoid
-  syscalls or stub them, until the stubs item above lands.
+- The operating system under the emulator is a small one. `syscalls.py`
+  services the calls a harness usually needs and nothing else; anything it
+  does not know comes back as ENOSYS, which is visible in `sys` rather than
+  silent. There is deliberately no host filesystem behind `open`.
+- A stubbed function is one step, not a step into: a stub stands in for the
+  whole call, so `s` over a stubbed `malloc` returns from it. A breakpoint on
+  it still stops before it.
+- SPARC and TriCore have calling conventions but no system call table, and
+  Unicorn 2.1.4 cannot map memory for TriCore at all, so nothing can be
+  emulated on it here.

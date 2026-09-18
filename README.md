@@ -32,6 +32,14 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   replaying forward in silence. With gdb this needs rr; with an emulator it
   falls out of the design. `goto` jumps to any instruction number in the
   recorded history.
+- **An operating system underneath**, so a harness no longer has to avoid
+  every call that leaves the binary. System calls are serviced by a small
+  Linux layer (`read`, `write`, `open`, `mmap`, `brk`, `exit` and friends)
+  with the right numbers and argument registers for each architecture, and
+  `malloc`, `free` and the common `str*`/`mem*` functions are stood in for at
+  the addresses your symbols give them. Both are on by default, both rewind
+  correctly when you step backwards, and `open` can see only the files the
+  harness handed over - never the debugging machine's own.
 - **Breakpoints and watchpoints** from Ghidra's Breakpoints window or the
   Listing: execute, read, write and access. A breakpoint stops *before* its
   instruction; a watchpoint stops *after* the accessing instruction completes,
@@ -358,6 +366,54 @@ python tools/export_symbols.py ~/ghidra_projects/unicorn/unicorn.gpr \
 
 An enclosing function wins over a nearer generated label, which is how gdb and
 IDA report an address.
+
+## When the program calls out of the binary
+
+A harness is a piece of a process with nothing behind it, so historically
+anything that trapped into a kernel or called into libc stopped the run. Two
+layers fix that, and both are on by default.
+
+**System calls.** The trap - `syscall`, `int 0x80`, `svc`, `sc`, `ecall`,
+`trap #0`, whichever this architecture uses - is serviced instead of
+faulting. `read`, `write`, `writev`, `open`, `openat`, `close`, `lseek`,
+`mmap`, `munmap`, `brk`, `getpid`, `exit` and `exit_group` are there, with
+the call numbers and argument registers of x86, x86-64, ARM, ARM64, MIPS
+(o32 and n64), RISC-V, PowerPC and m68k. Failures come back the way each
+architecture reports them, including MIPS's separate flag register and
+PowerPC's CR0 bit. Anything not in the table returns ENOSYS and shows up in
+`sys`, rather than failing silently.
+
+`--stdin FILE` is what the program reads from descriptor 0. There is no host
+filesystem: `open` sees only files the harness declared in a module-level
+`FILES` dict, so pointing this at a crashing input cannot reach your own
+files.
+
+**Function stubs.** Point `--symbols` at an exported symbol table and every
+implementation it can place is bound: `malloc`, `calloc`, `realloc`, `free`,
+`memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strncpy`,
+`strcat`, `strcmp`, `strncmp`, `strchr`, `strrchr`, `strstr`, `strdup`,
+`puts`, `putchar`, `exit`, `abort`. `malloc` allocates from an arena mapped
+on demand. A stub replaces the whole call, so stepping over a stubbed
+function is one step - but a breakpoint on it still stops before it stands
+in.
+
+In the console, `sys` shows the calls made, `stub` what is bound (and
+`stub NAME ADDR` binds one by hand), and `heap` the blocks handed out.
+A harness opts out with `SYSCALLS = False` or `STUBS = False`, or supplies
+its own `STDIN` and `FILES`.
+
+Both layers are correct under reverse execution, which is the interesting
+part: a system call is not a pure function of the machine state, and a stub
+skips the function's instructions entirely, so simply re-running them during
+a replay would consume the input twice, print twice, or walk into code the
+first pass never executed. Instead each call runs once and records what it
+did, and a replay applies the record. Step back over a `read` and the input
+is un-read, the heap block is un-allocated, and running forward again gives
+exactly the same bytes at exactly the same address.
+
+`examples/syscalls_and_stubs.py` is a complete worked example: a program
+with no libc and no kernel that reads, allocates, measures, prints and
+exits.
 
 ## Coverage and input provenance
 

@@ -57,7 +57,7 @@ takes.
   know nothing about Unicorn beyond the target's API. That is what lets each
   half be tested without the other, and it is why `triage.py` works with no
   Ghidra installed at all. Do not reach across.
-- **`arch.py` is a table.** Adding a processor is data, not code. Every
+- **`arch.py` and `abi.py` are tables.** Adding a processor is data, not code. Every
   language id, compiler spec and register name must be checked against the
   processor definitions in the installed Ghidra
   (`Ghidra/Processors/*/data/languages/*.ldefs` and the `define register`
@@ -67,6 +67,13 @@ takes.
   register, so they appear as editable rows in the Registers window. Every
   other bit of that register is a `Field`, reachable as `cpsr.M`. A `Flag` may
   be wider than one bit.
+- **Anything that stands in for code that is not there must be replay-safe.**
+  `syscalls.py` and `stubs.py` both change the machine in ways re-running the
+  instructions will not reproduce - and a stub skips instructions entirely, so
+  a replay where it did not fire diverges for good. Both therefore record what
+  they did and a replay applies the record; `effects.py` holds that logic once
+  so there are not two subtly different copies of it. A new layer of the same
+  kind uses `EffectLog` and does not invent its own.
 - **Nothing is done until a test covers it**, and a test that cannot fail is
   not a test. When something passes suspiciously easily, print the real
   sequence of events and look at it. The delay-slot bug below was hiding
@@ -92,6 +99,35 @@ Each of these has a regression test; do not undo them.
 - **`emu_start`'s count overruns after a `context_restore`**, and x86 flags
   are recomputed lazily from a stale word, so the timeline re-syncs the status
   register after every restore.
+- **Writing the program counter inside a `UC_HOOK_CODE` hook redirects
+  execution**, on every architecture here, including across a MIPS delay slot
+  and for a stack-based return on m68k. That is what makes a function stub a
+  hook rather than a patched binary. There is no need to `emu_stop` and
+  restart.
+- **The trap instruction leaves the program counter past itself everywhere
+  except m68k**, where the interrupt hook is entered with it still on the
+  `trap` - so returning without moving it traps forever. x86-64's `syscall`
+  arrives through `UC_HOOK_INSN`, not the interrupt hook, with the program
+  counter still on the instruction; Unicorn moves it afterwards itself.
+  `int 0x80` on x86-64 is the 32-bit compatibility entry with its own
+  numbering and is deliberately not wired up.
+- **Hooks fire in the order they were added**, so the target's own code hook
+  always runs first and `target.halting` tells anything else hooked to the
+  same address whether that instruction is actually about to run. Without
+  it a breakpoint on a stubbed function would stop *after* the stub had
+  already returned from it.
+- **The extra keyword to `hook_add` is `aux1`, not `arg1`**, which is how the
+  instruction is named for `UC_HOOK_INSN`. Getting it wrong raises nothing;
+  the hook is simply never called.
+- **Unicorn hands out zeroed pages on `mem_map`**, so `mmap` and a growing
+  `brk` do not need to write zeros over them, and recording those writes
+  would cost real memory for nothing.
+- **TriCore cannot map memory at all** in Unicorn 2.1.4: `mem_map` returns
+  `UC_ERR_ARG` at every address tried. It is in the tables and covered by the
+  static tests, and nothing can be emulated on it.
+- **`hlt` is a no-op on x86-64 under Unicorn**; it advances the instruction
+  pointer and carries on, so it is no good as a "this must never execute"
+  marker in a test.
 
 ## Ghidra behaviour that cost time to learn
 
@@ -126,7 +162,11 @@ Each of these has a regression test; do not undo them.
 
 ## Where to start
 
-[TODO.md](TODO.md) is ordered. The next item is syscall and function stubs,
-which is the biggest practical limit: anything that leaves the binary has to
-be stubbed today, which is why harnesses stay artificial. After that, a
-context panel inside Ghidra, then the three known reverse-execution bugs.
+[TODO.md](TODO.md) is ordered. The next item is conditional breakpoints with
+hit and ignore counts, which Ghidra's breakpoint model already carries fields
+for. After that, the two remaining reverse-execution bugs, then thumb
+tracking, batch mode and the console extras.
+
+`examples/syscalls_and_stubs.py` is the shortest way to see the system call
+and stub layers working: it reads, allocates, measures, prints and exits with
+neither a libc nor a kernel underneath it.
