@@ -27,6 +27,7 @@ difference with `_replaying` set, which mutes the breakpoint and watchpoint
 hooks and suppresses stop events, so a replay is invisible: no hit counts move
 and no listener hears about it. Only the reverse operation itself reports, once.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import threading
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -109,6 +110,7 @@ class UnicornTarget:
         self.timeline = Timeline(uc, interval=checkpoint_interval,
                                  budget=memory_budget, enabled=record)
         self._replaying = False
+        self._left = -1            # instructions left in this run; -1 is all
         self._trace: Optional[List[int]] = None
         self._write_hook = (uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
                             if record else None)
@@ -142,14 +144,17 @@ class UnicornTarget:
         if rf is not None:
             cur = self.uc.reg_read(rf[0].uc)
             self.uc.reg_write(rf[0].uc, rf[1].set(cur, value))
+            self.timeline.note_external_change()
             return
         f = self.spec.flag(name)
         if f is not None:
             src = self.spec.reg(f.source)
             cur = self.uc.reg_read(src.uc)
             self.uc.reg_write(src.uc, self.spec.set_flag(cur, name, bool(value)))
+            self.timeline.note_external_change()
             return
         self.uc.reg_write(self.spec.reg(name).uc, value)
+        self.timeline.note_external_change()
 
     def fields(self) -> List[Tuple[str, str]]:
         """Decoded fields of the status register, MSB first."""
@@ -188,10 +193,11 @@ class UnicornTarget:
         return bytes(self.uc.mem_read(address, size))
 
     def write(self, address: int, data: bytes) -> None:
-        # The memory hook only sees the program's own writes, so tell the
-        # timeline about this one or the next checkpoint would miss it.
-        self.timeline.note_external_write(address, len(data))
         self.uc.mem_write(address, data)
+        # The memory hook only sees the program's own writes, and this one is
+        # not in the instruction stream a replay re-runs, so the timeline has
+        # to checkpoint it.
+        self.timeline.note_external_write(address, len(data))
 
     def read_mapped(self, start: int, end: int) -> List[Tuple[int, bytes]]:
         """Read [start, end) clipped to mapped regions; returns chunks."""
@@ -251,8 +257,12 @@ class UnicornTarget:
 
     def _on_code(self, uc, address, size, user_data) -> None:
         if self._replaying:
-            # Re-running history: no breakpoints, no exits, no counting. The
-            # caller knows how many instructions it asked for.
+            # Re-running history: no breakpoints, no exits, no counting, and
+            # no stop event. Only the instruction limit applies.
+            if self._left == 0:
+                uc.emu_stop()
+                return
+            self._left -= 1
             if self._trace is not None:
                 self._trace.append(address)
             return
@@ -263,9 +273,16 @@ class UnicornTarget:
             self._pending = None
             uc.emu_stop()
             return
+        if self._left == 0:
+            # Unicorn's own instruction count overruns after a context_restore
+            # - it will happily run a whole basic block for a count of one -
+            # so the limit is enforced here, where a stop is exact.
+            uc.emu_stop()
+            return
         if self._first:
             self._first = False
             self.timeline.note_instruction()
+            self._left -= 1
             return
         if address in self.exits or (self.end is not None and address == self.end):
             self._stop = StopEvent('exit', address, f'Reached exit {address:#x}')
@@ -281,6 +298,7 @@ class UnicornTarget:
         # Nothing stopped us, so this instruction is about to run: the state we
         # are in now is the state at `timeline.icount`.
         self.timeline.note_instruction()
+        self._left -= 1
 
     def _on_write(self, uc, access, address, size, value, user_data) -> bool:
         """Note the pages the program writes, for the next checkpoint's delta."""
@@ -328,6 +346,7 @@ class UnicornTarget:
         self._stop = None
         self._pending = None
         self._first = True
+        self._left = count if count > 0 else -1     # -1: as long as it takes
         start = self._start_pc()
         stop_at = until if until is not None else (self.end if self.end is not None else 0)
         error = None
@@ -433,6 +452,9 @@ class UnicornTarget:
     def _require_reversible(self, k: int) -> None:
         if self._running:
             raise TargetError('target is running; interrupt it first')
+        self._check_bounds(k)
+
+    def _check_bounds(self, k: int) -> None:
         if not self.timeline.enabled:
             raise TargetError('execution history is off for this target')
         if not self.timeline.recording:
@@ -458,6 +480,7 @@ class UnicornTarget:
             return
         self._replaying = True
         self._trace = trace
+        self._left = n
         try:
             self.uc.emu_start(self._start_pc(), 0, 0, n)
         except UcError as e:
@@ -466,11 +489,44 @@ class UnicornTarget:
             self._replaying = False
             self._trace = None
 
+    def _restore_state(self, icount: int):
+        """The timeline's restore, plus the flag fix-up below."""
+        cp = self.timeline.restore(icount)
+        self._resync_status()
+        return cp
+
+    def _resync_status(self) -> None:
+        """Unicorn keeps x86's flags lazily in cc_op/cc_src, and the first
+        emu_start after a context_restore recomputes them from the stale
+        eflags word, losing PF and friends. Reading the status register forces
+        the computation; writing it back makes the word the truth again."""
+        name = self.spec.status
+        if name is None:
+            return
+        try:
+            reg = self.spec.reg(name)
+            self.uc.reg_write(reg.uc, self.uc.reg_read(reg.uc))
+        except (KeyError, UcError):
+            pass
+
+    @contextmanager
+    def _reversing(self):
+        """Hold the emulator for the duration of a reverse operation, so a
+        resume from another thread cannot start on top of a replay."""
+        with self._lock:
+            if self._running:
+                raise TargetError('target is already running')
+            self._running = True
+        try:
+            yield
+        finally:
+            self._running = False
+
     def _go(self, k: int) -> None:
         """Put the machine in the state it had at instruction k. Silent."""
         was = self.icount
-        self._require_reversible(k)
-        cp = self.timeline.restore(k)
+        self._check_bounds(k)
+        cp = self._restore_state(k)
         self.timeline.truncate(cp.icount)
         self._replay_forward(k - cp.icount)
         self.timeline.advance_to(k)
@@ -484,7 +540,7 @@ class UnicornTarget:
         """The PC at each instruction in [lo, hi], by replaying from the
         checkpoint at or before `lo`. Leaves the machine at the end of the
         replay, so a caller must always finish with `_go`."""
-        cp = self.timeline.restore(lo)
+        cp = self._restore_state(lo)
         trace: List[int] = []
         self._replay_forward(hi - cp.icount + 1, trace)
         return {cp.icount + i: pc for i, pc in enumerate(trace)}
@@ -514,7 +570,9 @@ class UnicornTarget:
 
     def goto_icount(self, k: int) -> StopEvent:
         """Restore the state the target had at instruction `k`."""
-        self._go(k)
+        self._require_reversible(k)
+        with self._reversing():
+            self._go(k)
         pc = self.pc()
         return self._notify(StopEvent(
             'step', pc, f'At instruction {k} ({pc:#x})'))
@@ -523,7 +581,8 @@ class UnicornTarget:
         """Undo the last n instructions."""
         k = self.icount - max(n, 1)
         self._require_reversible(k)
-        self._go(k)
+        with self._reversing():
+            self._go(k)
         pc = self.pc()
         return self._notify(StopEvent(
             'step', pc, f'Stepped back to {pc:#x} (instruction {k})'))
@@ -531,10 +590,12 @@ class UnicornTarget:
     def step_back_over(self, n: int = 1) -> StopEvent:
         """Undo the last n instructions, skipping back over whole calls."""
         k = self.icount
-        for _ in range(max(n, 1)):
-            self._require_reversible(k - 1)
-            k = self._prev_over()
-            self._go(k)
+        self._require_reversible(k - 1)
+        with self._reversing():
+            for _ in range(max(n, 1)):
+                self._check_bounds(k - 1)
+                k = self._prev_over()
+                self._go(k)
         pc = self.pc()
         return self._notify(StopEvent(
             'step', pc, f'Stepped back over to {pc:#x} (instruction {k})'))
@@ -569,22 +630,22 @@ class UnicornTarget:
                  if b.enabled and b.kind == EXECUTE}
         earliest = self.timeline.earliest
         found: Optional[int] = None
-        hi = cur - 1
-        while addrs and found is None and hi >= earliest:
-            cp = self.timeline.checkpoint_at_or_before(hi)
-            pcs = self._history_pcs(cp.icount, hi)
-            for j in range(hi, cp.icount - 1, -1):
-                if pcs[j] in addrs:
-                    found = j
-                    break
-            hi = cp.icount - 1
+        with self._reversing():
+            hi = cur - 1
+            while addrs and found is None and hi >= earliest:
+                cp = self.timeline.checkpoint_at_or_before(hi)
+                pcs = self._history_pcs(cp.icount, hi)
+                for j in range(hi, cp.icount - 1, -1):
+                    if pcs[j] in addrs:
+                        found = j
+                        break
+                hi = cp.icount - 1
+            self._go(earliest if found is None else found)
         if found is None:
-            self._go(earliest)
             pc = self.pc()
             return self._notify(StopEvent(
                 'stopped', pc, f'No earlier breakpoint; at the start of the '
                                f'history, instruction {earliest} ({pc:#x})'))
-        self._go(found)
         pc = self.pc()
         bp = self._bp_by_addr.get(pc)
         num = bp.num if bp is not None else 0

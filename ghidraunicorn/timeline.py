@@ -91,8 +91,22 @@ class Timeline:
             dirty.add(page)
             page += PAGE
 
-    #: writes made through the debugger rather than by the program
-    note_external_write = note_write
+    def note_external_write(self, address: int, size: int) -> None:
+        """A write made through the debugger rather than by the program.
+
+        It happens between instructions and replaying cannot reproduce it, so
+        the only way to keep it is to checkpoint the state it made.
+        """
+        if not self.enabled:
+            return
+        self.note_write(address, size)
+        if self.base is not None:
+            self.checkpoint()
+
+    def note_external_change(self) -> None:
+        """Registers were edited through the debugger; same story."""
+        if self.enabled and self.base is not None:
+            self.checkpoint()
 
     def uncount(self) -> None:
         """The last counted instruction did not complete after all (a fault).
