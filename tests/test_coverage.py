@@ -135,3 +135,28 @@ def test_byte_identical_to_afl_unicorns_writer(tmp_path):
         theirs.add_block(mid, start, size)
         ours.add_block(0, start, size)
     assert ours.to_bytes() == theirs.to_bytes()
+
+
+@pytest.mark.skipif(not os.getenv('AFL_UNICORN_DIR'), reason='AFL_UNICORN_DIR unset')
+def test_triage_writes_one_drcov_per_input(tmp_path):
+    """Replaying a crash should leave a coverage file aflcov can paint."""
+    from ghidraunicorn.triage import triage_inputs
+    root = os.getenv('AFL_UNICORN_DIR')
+    sample = os.path.join(root, 'unicorn_mode', 'samples', 'simple')
+    inputs = os.path.join(sample, 'sample_inputs')
+    harness = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'examples', 'afl_unicorn_simple.py')
+    if not os.path.isdir(inputs):
+        pytest.skip('sample inputs missing')
+    out = tmp_path / 'cov'
+    report = triage_inputs(harness, [inputs], coverage_dir=str(out), limit=2)
+    assert len(report.results) == 2
+    for r in report.results:
+        assert r.blocks > 0, r.path
+        assert os.path.isfile(r.coverage_path)
+        header, modules, blocks = parse(open(r.coverage_path, 'rb').read())
+        assert len(blocks) == r.blocks
+        # The module is the sample binary, and every block sits inside it.
+        assert any('simple_target.bin' in m[2] for m in modules.values()), modules
+    # Names with commas and colons are made filesystem-safe.
+    assert all(',' not in os.path.basename(r.coverage_path) for r in report.results)

@@ -36,6 +36,7 @@ import unicorn
 from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_INVALID, UcError
 
 from . import loaders
+from .coverage import SessionCoverage
 from .provenance import InputProvenance, format_ranges, ranges
 
 #: Instructions a single input may execute before it is called a timeout.
@@ -160,6 +161,9 @@ class InputResult:
     #: say where the input lives.
     input_read: Tuple[Tuple[int, int], ...] = ()
     input_at_fault: Tuple[Tuple[int, int], ...] = ()
+    #: Basic blocks executed, and where the drcov file was written.
+    blocks: int = 0
+    coverage_path: str = ''
 
     @property
     def name(self) -> str:
@@ -199,6 +203,8 @@ class InputResult:
             'signature': self.signature,
             'input_read': [list(r) for r in self.input_read],
             'input_at_fault': [list(r) for r in self.input_at_fault],
+            'blocks': self.blocks,
+            'coverage_path': self.coverage_path,
         }
 
 
@@ -441,6 +447,7 @@ def triage_input(harness: str, input_path: str, *,
                  stack_bytes: int = DEFAULT_STACK_BYTES,
                  signature: Callable[[InputResult], str] = DEFAULT_SIGNATURE,
                  input_at: Optional[int] = None,
+                 coverage_dir: Optional[str] = None,
                  ) -> InputResult:
     """Replay one input on a freshly built engine and report what it did."""
     try:
@@ -461,6 +468,10 @@ def triage_input(harness: str, input_path: str, *,
     prov = _provenance(target, loaded, input_at, size)
     if prov is not None:
         prov.start()
+    cov = None
+    if coverage_dir:
+        cov = SessionCoverage(target, loaded.modules)
+        cov.start()
     deadline = None if not timeout else started + timeout
     budget = _Budget(target.uc, max_instructions, deadline)
     faults = _FaultRecorder(target.uc)
@@ -485,6 +496,8 @@ def triage_input(harness: str, input_path: str, *,
         faults.remove()
         if prov is not None:
             prov.stop()
+        if cov is not None:
+            cov.stop()
     elapsed = time.monotonic() - started
 
     pc = ev.pc
@@ -517,7 +530,25 @@ def triage_input(harness: str, input_path: str, *,
         instructions=budget.count, wall_time=elapsed,
         input_read=() if prov is None else tuple(prov.read_ranges()),
         input_at_fault=() if prov is None or pc is None
-        else tuple(ranges(prov.reads_at(pc)))), signature)
+        else tuple(ranges(prov.reads_at(pc))),
+        blocks=0 if cov is None else cov.block_count,
+        coverage_path='' if cov is None else _save_coverage(cov, coverage_dir, input_path)),
+        signature)
+
+
+def _safe_name(name: str) -> str:
+    """Fuzzer file names carry commas and colons; keep them off the filesystem."""
+    return ''.join(c if c.isalnum() or c in '.-_' else '_' for c in name)[:120]
+
+
+def _save_coverage(cov: SessionCoverage, directory: str, input_path: str) -> str:
+    os.makedirs(directory, exist_ok=True)
+    out = os.path.join(directory, _safe_name(os.path.basename(input_path)) + '.drcov')
+    try:
+        cov.save(out)
+    except OSError:
+        return ''
+    return out
 
 
 def _provenance(target, loaded, input_at: Optional[int],
@@ -611,6 +642,7 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
                   limit: Optional[int] = None,
                   progress: Optional[Callable[[InputResult], None]] = None,
                   input_at: Optional[int] = None,
+                  coverage_dir: Optional[str] = None,
                   ) -> TriageReport:
     """Replay every input through `harness` and group the outcomes.
 
@@ -625,7 +657,7 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
         r = triage_input(harness, path, start=start, end=end, image=image,
                          max_instructions=max_instructions, timeout=timeout,
                          stack_bytes=stack_bytes, signature=signature,
-                         input_at=input_at)
+                         input_at=input_at, coverage_dir=coverage_dir)
         report.results.append(r)
         if progress is not None:
             progress(r)
@@ -693,6 +725,8 @@ def format_detail(result: InputResult, spec_status: Optional[str] = None) -> str
         i = result.instruction
         out.append(f'  insn:  {i.address:#x}  {i.bytes.hex():<16} {i.text}')
     out.append(f'  ran {result.instructions} instructions in {result.wall_time:.3f}s')
+    if result.coverage_path:
+        out.append(f'  coverage: {result.blocks} blocks -> {result.coverage_path}')
     if result.input_read:
         out.append(f'  input read: {format_ranges(result.input_read)}')
         if result.input_at_fault:
@@ -764,6 +798,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--input-at', metavar='ADDR',
                    help='address the harness writes the input to, if it does '
                         'not declare INPUT_BASE; enables the input-bytes report')
+    p.add_argument('--coverage-dir', metavar='DIR',
+                   help='write a drcov file per input here, for ghidra-aflcov '
+                        'or Lighthouse')
     p.add_argument('--stack-bytes', type=int, default=DEFAULT_STACK_BYTES,
                    help='bytes of stack captured at the stop')
     p.add_argument('--signature', choices=sorted(SIGNATURES), default='kind-pc',
@@ -797,7 +834,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             start=_addr(args.start), end=_addr(args.end), image=args.image,
             max_instructions=args.max_instructions, timeout=args.timeout,
             stack_bytes=args.stack_bytes, signature=SIGNATURES[args.signature],
-            limit=args.limit, progress=progress, input_at=_addr(args.input_at))
+            limit=args.limit, progress=progress, input_at=_addr(args.input_at),
+            coverage_dir=args.coverage_dir)
     except FileNotFoundError as e:
         print(f'no such input: {e}', file=sys.stderr)
         return 2

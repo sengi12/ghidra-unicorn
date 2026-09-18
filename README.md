@@ -322,6 +322,9 @@ is the short answer to which bytes matter:
   input read: 0, 9-10
 ```
 
+Add `--coverage-dir DIR` and each replayed input leaves a drcov file there,
+ready to load in ghidra-aflcov and paint over the same listing.
+
 To put the result back in front of you in Ghidra:
 
 ```

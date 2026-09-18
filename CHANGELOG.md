@@ -14,7 +14,9 @@ Notable changes to ghidra-unicorn. The format follows
   format ghidra-aflcov, Lighthouse and Dragondance read. Blocks outside every
   declared module are attributed to the mapped region they landed in rather
   than dropped. A test asserts the bytes are identical to afl-unicorn's own
-  writer for the same input, so the files are interchangeable. Not yet wired
+  writer for the same input, so the files are interchangeable. Triage takes
+  `--coverage-dir` and leaves one drcov file per replayed input, so a crash
+  can be painted in ghidra-aflcov straight from a triage run. Not yet wired
   to a console command or launcher option.
 - **Symbol names** in `symbols.py`, loaded from JSON that
   `tools/export_symbols.py` writes from an open Ghidra program. The context

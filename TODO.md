@@ -13,9 +13,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   `resume_back`, `step_back_into` and `step_back_over` so Ghidra's existing
   step-back toolbar buttons work, and add `rsi`/`rni`/`rc`/`goto` to the
   console. Only an emulator can offer this without something like rr.
-- [~] **More processors, and a Windows launcher.** RISC-V, PowerPC, m68k and
-  SPARC are table entries in `arch.py`. Ghidra supports `.bat` and PowerShell
-  launchers; we ship only the Unix one.
 
 ## Next
 
@@ -30,9 +27,10 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   lift. This is the biggest practical limit today: anything that leaves the
   binary has to be stubbed.
 - [~] **Coverage handoff to ghidra-aflcov.** The recorder and drcov writer
-  are in `coverage.py`, proved byte-identical to afl-unicorn's writer, which
-  is what aflcov, Lighthouse and Dragondance read. Still to wire: a console
-  command and a launcher option to start recording and save on exit.
+  are in `coverage.py`, proved byte-identical to afl-unicorn's writer, and
+  triage writes one file per input with `--coverage-dir`. Still to wire: a
+  console command and a launcher option, so a live session can record and
+  save on exit.
 - [~] **Input provenance.** `provenance.py` records reads of the input
   buffer and answers which offsets a given instruction consumed and which
   bytes were never read, and the triage report shows it per input. Still to
@@ -66,6 +64,12 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   that matter are resident and huge dumps stay usable.
 
 ## Known bugs
+
+- [ ] **A flag register must be one bit wide.** `Flag` carries a single bit
+  position, so the wider status fields Ghidra does model as registers stay
+  fields only and cannot be edited in the Registers window: m68k's three-bit
+  interrupt level and PowerPC's seven-bit `xer_count`. Giving `Flag` a width
+  and routing it through the field accessors would cover both.
 
 - [ ] **A stop forced from outside is reported as termination.** When a hook
   that the target does not own calls `emu_stop` and the harness declared an
