@@ -23,6 +23,13 @@ Notable changes to ghidra-unicorn. The format follows
   report an address, and a label inside a function does not describe
   addresses outside it. Not yet wired to a launcher option or to breakpoints
   by name.
+- **Input provenance** in `provenance.py`: a read hook over the input buffer
+  that records which offsets were read and by which instruction, so a crash
+  can be traced back to the bytes that reached it, along with which parts of
+  the input were never looked at. It records direct reads rather than
+  following values through registers, which is honest about its cost and
+  enough for most parsers. Not yet wired to a console command or the triage
+  report.
 
 ### Changed
 

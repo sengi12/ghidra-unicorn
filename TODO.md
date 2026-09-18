@@ -37,9 +37,10 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   are in `coverage.py`, proved byte-identical to afl-unicorn's writer, which
   is what aflcov, Lighthouse and Dragondance read. Still to wire: a console
   command and a launcher option to start recording and save on exit.
-- [ ] **Input provenance.** Tag the input buffer with a read hook and report
-  which input offsets reach the faulting instruction, answering "which bytes
-  do I have to change".
+- [~] **Input provenance.** `provenance.py` records reads of the input
+  buffer and answers which offsets a given instruction consumed and which
+  bytes were never read. Still to wire: a console command and a column in the
+  triage report.
 - [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
   model already carries Condition and Ignore Count; populate them and
   evaluate a Python predicate in the hook.
