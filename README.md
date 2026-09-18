@@ -278,6 +278,84 @@ launches the connector; the difference is only which terminal you type in.
 Pair it with [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov) to
 paint the fuzzer's coverage over the same listing you are stepping through.
 
+## Triaging a fuzzing run
+
+Stepping one crash is useful; a fuzzer hands you a directory of them. Replay
+the whole directory and see what is actually distinct:
+
+```
+python -m ghidraunicorn.triage \
+    --harness examples/afl_unicorn_simple.py \
+    --inputs .../output/default/crashes \
+    --json crashes.json
+```
+
+```
+4 inputs through afl_unicorn_simple.py: 4 crash
+3 distinct signatures (3 crashing)
+
+COUNT  OUTCOME  KIND                  PC        INSTRUCTION     FAULT ADDR  REPRESENTATIVE
+2      crash    UC_ERR_READ_UNMAPPED  0x1000dc  lbu $v0, ($v0)  0x0         id:000002,sig:06,...
+1      crash    UC_ERR_READ_UNMAPPED  0x10002c  lbu $v0, ($v0)  0x0         id:000001,sig:06,...
+1      crash    UC_ERR_READ_UNMAPPED  0x10008c  lbu $v0, ($v0)  0x0         id:000000,sig:06,...
+```
+
+Those three addresses are the three null reads in the sample's source, so the
+four files are three bugs. Each input runs in a fresh target, bounded by an
+instruction budget and a wall clock so a looping input is reported as a
+timeout rather than hanging. Crashes are grouped by a signature, by default
+the fault kind and the faulting address, and each group keeps its smallest
+input as the representative. The command exits non-zero when anything
+crashed, so it can gate CI, and it needs no Ghidra at all.
+
+To put the result back in front of you in Ghidra:
+
+```
+python tools/import_triage.py --json crashes.json \
+    --project ~/ghidra_projects/unicorn --program simple_target.bin
+```
+
+That writes a bookmark and a comment at each crash address, so the listing
+shows where crashes land and how many inputs reach each one. It is idempotent,
+takes `--dry-run`, and takes `--offset` when the emulated addresses sit at a
+different image base than the program.
+
+## Naming addresses
+
+Ghidra knows the function names; Unicorn only knows addresses. Export them
+once and the context prints `0x100040 <main+0x40>` instead of a bare number:
+
+```
+python tools/export_symbols.py ~/ghidra_projects/unicorn/unicorn.gpr \
+    simple_target.bin symbols.json
+```
+
+An enclosing function wins over a nearer generated label, which is how gdb and
+IDA report an address.
+
+## Coverage and input provenance
+
+`ghidraunicorn.coverage` records the basic blocks a run executed and writes
+drcov, the format [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov),
+Lighthouse and Dragondance read; the files are byte-identical to the ones
+afl-unicorn's own writer produces, and a test keeps them that way.
+`ghidraunicorn.provenance` watches reads of the input buffer and records which
+offsets were read and by which instruction, so a crash points back at the
+bytes that reached it and you can see which parts of the input were never
+looked at.
+
+Both are libraries today, usable from the console's Python prompt:
+
+```python
+from ghidraunicorn.coverage import SessionCoverage
+cov = SessionCoverage(target, loaded.modules); cov.start()
+# ... run ...
+cov.save('run.drcov')
+```
+
+Wiring them to a console command and a launcher option is on the
+[roadmap](TODO.md).
+
 ## How it is built
 
 ```
@@ -292,11 +370,17 @@ ghidraunicorn/
   context.py    the gef-style context printout
   console.py    the terminal commands on top of a Python console
   __main__.py   entry point: connect, load, publish, then console
+  triage.py     replay a directory of fuzzing inputs and group the crashes
+  symbols.py    names for addresses, exported from a Ghidra program
+  coverage.py   basic-block recording, written as drcov
+  provenance.py which input bytes were read, and by which instruction
 debugger-launchers/local-unicorn.sh   the launcher Ghidra shows in its menu
 examples/      harnesses
-tests/         pytest, no Ghidra needed (61 tests, incl. a real-pty test)
-tools/e2e_ghidra.py   drives a real Ghidra through the whole flow
+tests/         pytest, no Ghidra needed (106 tests, incl. a real-pty test)
+tools/e2e_ghidra.py     drives a real Ghidra through the whole flow
 tools/setup_project.py  makes a project with the sample imported
+tools/export_symbols.py exports a program's symbols as JSON
+tools/import_triage.py  paints a triage report onto a program
 ```
 
 `target.py` knows nothing about Ghidra and `commands.py`/`methods.py` know
