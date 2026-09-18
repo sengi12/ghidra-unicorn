@@ -7,9 +7,8 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Thumb tracking.** Follow `cpsr.T` per instruction and keep Ghidra's
-  `TMode` context register in step, so mixed ARM and Thumb code disassembles
-  correctly rather than being pinned to the language chosen at launch.
+- [ ] **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
+  for runs with no GUI, so a session can be scripted and used in CI.
 
 ## Later
 
@@ -22,8 +21,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   same program under both engines and compare registers each step. A
   disagreement is a bug in a SLEIGH specification or in Unicorn, which makes
   this a useful test as well as a research tool.
-- [ ] **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
-  for runs with no GUI, so a session can be scripted and used in CI.
 - [ ] **Console extras.** `disas`, memory search, a hexdump with an ASCII
   pane, `x/i`, and register watchpoints.
 - [ ] **Session recording.** Log every command and stop to a file so a triage

@@ -301,7 +301,9 @@ def putreg() -> Dict[str, List[str]]:
             continue
         v &= (1 << (8 * r.size)) - 1
         values.append(RegVal(r.name, v.to_bytes(r.size, 'big')))
-    for name, v in target.spec.context.items():
+    # From the live machine, not the launch spec: ARM changes instruction
+    # set as it runs, and Ghidra disassembles by TMode.
+    for name, v in target.context().items():
         values.append(RegVal(name, v.to_bytes(1, 'big')))
     for name, v in target.flags().items():
         values.append(RegVal(name, bytes([v])))

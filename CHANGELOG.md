@@ -9,6 +9,24 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Thumb tracking.** ARM code changes instruction set as it runs, and
+  everything that used to be settled by the language the target was launched
+  with now follows the processor instead: the T flag in the status register
+  is the one source of truth, and the decoder, the address emulation is
+  resumed from, and the `TMode` context register Ghidra disassembles by are
+  all derived from it. A stop in Thumb code is published as Thumb, so mixed
+  code comes up right in the Dynamic Listing rather than four-byte ARM
+  instructions laid over two-byte Thumb ones. Two Unicorn behaviours made
+  this necessary and are now covered by tests: `emu_start` decides how to
+  decode from the low bit of the address it is given and *not* from the T
+  flag, so resuming a Thumb program counter without that bit reads the wrong
+  instruction at the wrong width; and creating the engine with
+  `UC_MODE_THUMB` does not set the T flag at all, so a Thumb target used to
+  begin life claiming to be in ARM state. Writing the program counter on ARM
+  is itself a `bx` - the low bit selects the instruction set and never
+  reaches the register - so moving it now keeps the instruction set it was
+  in, and the T flag is how a change is asked for.
+
 - **Conditional breakpoints, hit and ignore counts.** A breakpoint or
   watchpoint can carry a Python expression that has to be true before it
   stops, and an ignore count that passes it a given number of times first.

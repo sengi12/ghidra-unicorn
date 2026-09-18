@@ -104,6 +104,16 @@ Each of these has a regression test; do not undo them.
 - **`emu_start`'s count overruns after a `context_restore`**, and x86 flags
   are recomputed lazily from a stale word, so the timeline re-syncs the status
   register after every restore.
+- **`emu_start` decodes ARM or Thumb from the low bit of the address it is
+  given, not from the T flag.** Resuming a Thumb program counter without
+  that bit reads the instruction as ARM, at the wrong width. Creating the
+  engine with `UC_MODE_THUMB` does not set the T flag either, so the target
+  sets it at construction; and writing the program counter on ARM *is* a
+  `bx`, where the low bit picks the instruction set and is stripped before
+  it reaches the register. The T flag is the single source of truth for
+  which instruction set the machine is in; `target.thumb` reads it and the
+  decoder, `_start_pc` and `TMode` all follow it. Do not reintroduce
+  anything keyed on the launch spec.
 - **Writing the program counter inside a `UC_HOOK_CODE` hook redirects
   execution**, on every architecture here, including across a MIPS delay slot
   and for a stack-based return on m68k. That is what makes a function stub a
@@ -175,8 +185,8 @@ Each of these has a regression test; do not undo them.
 ## Where to start
 
 [TODO.md](TODO.md) is ordered and there are no known bugs left. The next
-item is thumb tracking, then batch and headless mode, the console extras,
-session recording and region-aware preloading. The two items needing a
+item is batch and headless mode, then the console extras, session recording
+and region-aware preloading. The two items needing a
 running Ghidra - the context panel and differential execution against the
 p-code emulator - are last.
 

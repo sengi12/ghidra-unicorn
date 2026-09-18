@@ -57,6 +57,10 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   the trace onto your static listing, and, by default, all mapped memory
   copied into the trace at launch (capped at 32 MiB) so the Listing is
   populated immediately. Everything else is read on demand.
+- **Thumb tracking**: ARM code that switches instruction set with `blx` or
+  `bx` is followed as it runs, so each stop tells Ghidra which set it is in
+  and mixed code disassembles correctly instead of being pinned to the
+  language chosen at launch.
 - **Architectures**: x86-64, x86, AArch64, ARM and Thumb, MIPS32 and MIPS64,
   RISC-V 32 and 64, PowerPC 32 and 64, m68k, SPARC 32 and 64, and TriCore,
   in both endiannesses wherever Unicorn supports the pair. Twenty in all, and

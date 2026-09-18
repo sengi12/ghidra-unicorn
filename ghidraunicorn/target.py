@@ -166,7 +166,7 @@ class UnicornTarget:
         self._code_hook = uc.hook_add(UC_HOOK_CODE, self._on_code)
         self._fault: Optional[Tuple[str, int, int]] = None
         uc.hook_add(UC_HOOK_MEM_INVALID, self._on_invalid)
-        self._cs = None
+        self._decoders: Dict[Tuple[int, int], object] = {}
         self.timeline = Timeline(uc, interval=checkpoint_interval,
                                  budget=memory_budget, enabled=record)
         self.timeline.on_forget = self._on_history_forgotten
@@ -185,6 +185,7 @@ class UnicornTarget:
         #: While a search replays history, where watchpoints would have
         #: fired. None outside one, which is when they may actually stop.
         self._observed: Optional[List[Tuple[int, Breakpoint, Dict]]] = None
+        self._sync_thumb_flag()
         #: Set by `syscalls.install`; None means traps are left to Unicorn.
         self.syscalls = None
         #: Set by `stubs.install`; None means no function is stood in for.
@@ -227,6 +228,8 @@ class UnicornTarget:
         inside a hook on every system call, and during a replay it would
         append a checkpoint for an instruction that has already happened.
         """
+        keep_thumb = (self.spec.thumb_field is not None
+                      and name.lower() == self.spec.pc.lower() and self.thumb)
         rf = self._field(name)
         if rf is not None:
             cur = self.uc.reg_read(rf[0].uc)
@@ -239,6 +242,13 @@ class UnicornTarget:
                 self.uc.reg_write(src.uc, f.set(cur, int(value)))
             else:
                 self.uc.reg_write(self.spec.reg(name).uc, value)
+        if keep_thumb and not self.thumb:
+            # Writing the program counter on ARM *is* a `bx`: the low bit
+            # picks the instruction set and never reaches the register, so an
+            # even address silently drops out of Thumb. Someone moving the
+            # program counter did not ask to change instruction set; writing
+            # the T flag is how that is asked for.
+            self.uc.reg_write(self.spec.reg(self.spec.pc).uc, value | 1)
         if external:
             self.timeline.note_external_change()
 
@@ -615,9 +625,61 @@ class UnicornTarget:
 
     def _start_pc(self) -> int:
         pc = self.pc()
-        if self.spec.context.get('TMode'):
-            pc |= 1      # Unicorn wants the Thumb bit on the start address
+        if self.thumb:
+            # emu_start decides how to decode from this bit and *not* from
+            # the T flag, so resuming a Thumb program counter without it
+            # reads the instruction as ARM: the wrong width, and usually the
+            # wrong instruction.
+            pc |= 1
         return pc
+
+    # ---- instruction set -------------------------------------------------
+
+    @property
+    def thumb(self) -> bool:
+        """Whether the processor is in Thumb state now.
+
+        Not a property of the language the target was launched with: ARM
+        code changes instruction set as it runs, with `blx` and with `bx` to
+        an odd address, and the T flag in the status register is where that
+        shows.
+        """
+        field = self.spec.thumb_field
+        if field is None or self.spec.status is None:
+            return False
+        try:
+            return bool(self.reg_read(f'{self.spec.status}.{field}'))
+        except (KeyError, UcError):
+            return False
+
+    def _sync_thumb_flag(self) -> None:
+        """Make the T flag agree with the language the target was launched as.
+
+        Creating the engine with UC_MODE_THUMB does not set it - both modes
+        start with the flag clear - so a Thumb target would otherwise begin
+        life claiming to be in ARM state, and everything derived from the
+        flag would be wrong until the first `bx`.
+        """
+        if not self.spec.context.get('TMode') or self.spec.status is None:
+            return
+        try:
+            if not self.thumb:
+                self.reg_write(f'{self.spec.status}.{self.spec.thumb_field}', 1,
+                               external=False)
+        except (KeyError, UcError):
+            pass
+
+    def context(self) -> Dict[str, int]:
+        """Ghidra's context registers for the state the machine is in now.
+
+        TMode is not settled by the language: a stop in Thumb code has to say
+        so, or Ghidra disassembles four-byte ARM instructions over two-byte
+        Thumb ones and the Dynamic Listing is nonsense from there on.
+        """
+        ctx = dict(self.spec.context)
+        if self.spec.thumb_field is not None:
+            ctx['TMode'] = 1 if self.thumb else 0
+        return ctx
 
     def _notify(self, ev: StopEvent) -> StopEvent:
         for cb in list(self.listeners):
@@ -1063,11 +1125,9 @@ class UnicornTarget:
     def decode(self, address: int) -> Optional[Tuple[int, str, str]]:
         """(size, mnemonic, operands) of the instruction at address, via
         Capstone when available; None otherwise."""
-        if self.spec.cs is None:
+        decoder = self._decoder()
+        if decoder is None:
             return None
-        if self._cs is None:
-            import capstone
-            self._cs = capstone.Cs(*self.spec.cs)
         try:
             code = self.read(address, 16)
         except UcError:
@@ -1075,6 +1135,23 @@ class UnicornTarget:
                 code = self.read(address, 4)
             except UcError:
                 return None
-        for _, size, mnem, ops in self._cs.disasm_lite(code, address, 1):
+        for _, size, mnem, ops in decoder.disasm_lite(code, address, 1):
             return size, mnem, ops
         return None
+
+    def _decoder(self):
+        """The Capstone for the instruction set the processor is in now."""
+        spec = self.spec
+        mode = spec.cs
+        if spec.thumb_field is not None:
+            alt = spec.cs_thumb if self.thumb else spec.cs_arm
+            if alt is not None:
+                mode = alt
+        if mode is None:
+            return None
+        decoder = self._decoders.get(mode)
+        if decoder is None:
+            import capstone
+            decoder = capstone.Cs(*mode)
+            self._decoders[mode] = decoder
+        return decoder

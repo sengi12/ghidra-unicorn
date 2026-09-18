@@ -113,7 +113,18 @@ class ArchSpec:
     #: manual calls it.
     return_mnemonics: Tuple[str, ...] = ()
     #: Extra register values Ghidra needs for correct disassembly context.
+    #: A processor that switches instruction set at run time overrides these
+    #: from the live machine state; see `UnicornTarget.context`.
     context: Dict[str, int] = field(default_factory=dict)
+    #: ARM changes instruction set as it runs, so a decode has to follow the
+    #: processor rather than the language the target was launched with.
+    #: These are Capstone's two modes for it; `cs` stays whichever one the
+    #: launch spec named.
+    cs_arm: Optional[Tuple[int, int]] = None
+    cs_thumb: Optional[Tuple[int, int]] = None
+    #: The status-register field that is set while the processor is in Thumb
+    #: state, and that Ghidra's TMode context register has to follow.
+    thumb_field: Optional[str] = None
     #: Ghidra's flag registers, derived from a status register.
     flags: Tuple[Flag, ...] = ()
     #: The status register the flags come from (for display).
@@ -274,6 +285,9 @@ def _arm(big: bool, thumb: bool) -> ArchSpec:
                     tuple(regs), 'pc', 'sp', cs=_cs('CS_ARCH_ARM', cs_mode),
                     call_mnemonics=('bl', 'blx'), return_mnemonics=_ARM_RETURNS,
                     context={'TMode': 1} if thumb else {},
+                    cs_arm=_cs('CS_ARCH_ARM', 'CS_MODE_ARM'),
+                    cs_thumb=_cs('CS_ARCH_ARM', 'CS_MODE_THUMB'),
+                    thumb_field='T',
                     flags=_flags(_ARM_FLAG_BITS, 'cpsr'), status='cpsr', fields=_ARM_FIELDS)
 
 
