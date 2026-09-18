@@ -9,8 +9,9 @@ Two sources are supported:
 
   and may return ``(uc, start, end)`` instead of a bare engine. Optional
   module-level names ``START``, ``END`` (int addresses), ``EXITS`` (iterable of
-  addresses), and ``MODULES`` (list of ``(name, base, size)``) refine what
-  Ghidra sees. ``create`` runs once; the engine it returns is what gets
+  addresses), ``MODULES`` (list of ``(name, base, size)``) and
+  ``INPUT_BASE``/``INPUT_SIZE`` (or ``INPUT_REGION``, where the input was
+  written) refine what Ghidra and the triage report see. ``create`` runs once; the engine it returns is what gets
   debugged, so map memory, load code and the input, and set PC/SP in there.
 
 * An **afl-unicorn context directory** produced by one of the
@@ -49,6 +50,9 @@ class Loaded:
     target: UnicornTarget
     modules: List[Module] = field(default_factory=list)
     description: str = ''
+    #: Where the harness put the fuzz input, as (base, maximum size), when it
+    #: says so. Triage uses it to report which input bytes a crash read.
+    input_region: Optional[Tuple[int, int]] = None
 
 
 def _parse_addr(value) -> Optional[int]:
@@ -114,7 +118,21 @@ def load_harness(path: str, input_file: Optional[str] = None,
     modules = [Module(n, _parse_addr(b), int(s)) for n, b, s in getattr(mod, 'MODULES', ())]
     if not modules:
         modules = default_modules(target, image)
-    return Loaded(target, modules, f'harness {os.path.basename(path)}')
+    return Loaded(target, modules, f'harness {os.path.basename(path)}',
+                  input_region=_input_region(mod))
+
+
+def _input_region(mod) -> Optional[Tuple[int, int]]:
+    """`INPUT_REGION = (base, size)`, or `INPUT_BASE` with optional `INPUT_SIZE`."""
+    region = getattr(mod, 'INPUT_REGION', None)
+    if region:
+        base, size = region
+        return _parse_addr(base), int(size)
+    base = _parse_addr(getattr(mod, 'INPUT_BASE', None))
+    if base is None:
+        return None
+    size = getattr(mod, 'INPUT_SIZE', None)
+    return base, int(size) if size else 0
 
 
 # ---------------------------------------------------------------------------

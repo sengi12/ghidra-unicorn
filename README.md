@@ -308,6 +308,15 @@ the fault kind and the faulting address, and each group keeps its smallest
 input as the representative. The command exits non-zero when anything
 crashed, so it can gate CI, and it needs no Ghidra at all.
 
+With `--verbose`, and a harness that declares `INPUT_BASE` as the example one
+does, each result also reports the input offsets that run actually read, which
+is the short answer to which bytes matter:
+
+```
+  insn:  0x1000dc  90420000         lbu $v0, ($v0)
+  input read: 0, 9-10
+```
+
 To put the result back in front of you in Ghidra:
 
 ```

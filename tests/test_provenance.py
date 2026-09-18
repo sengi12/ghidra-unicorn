@@ -69,3 +69,32 @@ def test_reads_outside_the_buffer_are_not_recorded():
     t.run()
     prov.stop()
     assert prov.accesses == [] and prov.unread_ranges() == [(0, 15)]
+
+
+def test_loaders_read_the_declared_input_region(tmp_path):
+    from ghidraunicorn import loaders
+    harness = tmp_path / 'h.py'
+    harness.write_text(
+        'from unicorn import UC_ARCH_X86, UC_MODE_64, Uc\n'
+        'from unicorn.x86_const import UC_X86_REG_RIP\n'
+        'INPUT_BASE = 0x300000\n'
+        'INPUT_SIZE = 0x1000\n'
+        'def create(input_file=None):\n'
+        '    uc = Uc(UC_ARCH_X86, UC_MODE_64)\n'
+        '    uc.mem_map(0x100000, 0x1000)\n'
+        '    uc.mem_map(0x300000, 0x1000)\n'
+        '    uc.reg_write(UC_X86_REG_RIP, 0x100000)\n'
+        '    return uc\n')
+    loaded = loaders.load_harness(str(harness))
+    assert loaded.input_region == (0x300000, 0x1000)
+
+    # The tuple form works too, and a harness that says nothing reports None.
+    harness2 = tmp_path / 'h2.py'
+    harness2.write_text(harness.read_text().replace(
+        'INPUT_BASE = 0x300000\nINPUT_SIZE = 0x1000',
+        'INPUT_REGION = (0x300000, 0x40)'))
+    assert loaders.load_harness(str(harness2)).input_region == (0x300000, 0x40)
+    harness3 = tmp_path / 'h3.py'
+    harness3.write_text(harness.read_text().replace(
+        'INPUT_BASE = 0x300000\nINPUT_SIZE = 0x1000\n', ''))
+    assert loaders.load_harness(str(harness3)).input_region is None

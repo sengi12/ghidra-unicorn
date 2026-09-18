@@ -35,8 +35,8 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   command and a launcher option to start recording and save on exit.
 - [~] **Input provenance.** `provenance.py` records reads of the input
   buffer and answers which offsets a given instruction consumed and which
-  bytes were never read. Still to wire: a console command and a column in the
-  triage report.
+  bytes were never read, and the triage report shows it per input. Still to
+  wire: a console command.
 - [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
   model already carries Condition and Ignore Count; populate them and
   evaluate a Python predicate in the hook.

@@ -36,6 +36,7 @@ import unicorn
 from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_INVALID, UcError
 
 from . import loaders
+from .provenance import InputProvenance, format_ranges, ranges
 
 #: Instructions a single input may execute before it is called a timeout.
 DEFAULT_MAX_INSTRUCTIONS = 10_000_000
@@ -154,6 +155,11 @@ class InputResult:
     instructions: int = 0
     wall_time: float = 0.0
     signature: str = ''
+    #: Inclusive (start, end) runs of input offsets the program read, and the
+    #: subset the faulting instruction read. Empty when the harness does not
+    #: say where the input lives.
+    input_read: Tuple[Tuple[int, int], ...] = ()
+    input_at_fault: Tuple[Tuple[int, int], ...] = ()
 
     @property
     def name(self) -> str:
@@ -191,6 +197,8 @@ class InputResult:
             'instructions': self.instructions,
             'wall_time': round(self.wall_time, 6),
             'signature': self.signature,
+            'input_read': [list(r) for r in self.input_read],
+            'input_at_fault': [list(r) for r in self.input_at_fault],
         }
 
 
@@ -432,6 +440,7 @@ def triage_input(harness: str, input_path: str, *,
                  timeout: Optional[float] = DEFAULT_TIMEOUT,
                  stack_bytes: int = DEFAULT_STACK_BYTES,
                  signature: Callable[[InputResult], str] = DEFAULT_SIGNATURE,
+                 input_at: Optional[int] = None,
                  ) -> InputResult:
     """Replay one input on a freshly built engine and report what it did."""
     try:
@@ -449,6 +458,9 @@ def triage_input(harness: str, input_path: str, *,
             wall_time=time.monotonic() - started), signature)
 
     target = loaded.target
+    prov = _provenance(target, loaded, input_at, size)
+    if prov is not None:
+        prov.start()
     deadline = None if not timeout else started + timeout
     budget = _Budget(target.uc, max_instructions, deadline)
     faults = _FaultRecorder(target.uc)
@@ -471,6 +483,8 @@ def triage_input(harness: str, input_path: str, *,
             watchdog.cancel()
         budget.remove()
         faults.remove()
+        if prov is not None:
+            prov.stop()
     elapsed = time.monotonic() - started
 
     pc = ev.pc
@@ -500,7 +514,30 @@ def triage_input(harness: str, input_path: str, *,
         description=description, pc=pc,
         instruction=_decode(target, pc), fault=fault,
         registers=_registers(target), stack=_stack(target, stack_bytes),
-        instructions=budget.count, wall_time=elapsed), signature)
+        instructions=budget.count, wall_time=elapsed,
+        input_read=() if prov is None else tuple(prov.read_ranges()),
+        input_at_fault=() if prov is None or pc is None
+        else tuple(ranges(prov.reads_at(pc)))), signature)
+
+
+def _provenance(target, loaded, input_at: Optional[int],
+                size: int) -> Optional[InputProvenance]:
+    """Watch the input buffer, when we know where the harness put it."""
+    if size <= 0:
+        return None
+    declared = getattr(loaded, 'input_region', None)
+    base = input_at if input_at is not None else (declared[0] if declared else None)
+    if base is None:
+        return None
+    length = size
+    if declared and declared[1]:
+        length = min(length, declared[1])
+    if length <= 0:
+        return None
+    try:
+        return InputProvenance(target, base, length)
+    except Exception:
+        return None
 
 
 def _finish(result: InputResult, signature: Callable[[InputResult], str]) -> InputResult:
@@ -573,6 +610,7 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
                   signature: Callable[[InputResult], str] = DEFAULT_SIGNATURE,
                   limit: Optional[int] = None,
                   progress: Optional[Callable[[InputResult], None]] = None,
+                  input_at: Optional[int] = None,
                   ) -> TriageReport:
     """Replay every input through `harness` and group the outcomes.
 
@@ -586,7 +624,8 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
     for path in paths:
         r = triage_input(harness, path, start=start, end=end, image=image,
                          max_instructions=max_instructions, timeout=timeout,
-                         stack_bytes=stack_bytes, signature=signature)
+                         stack_bytes=stack_bytes, signature=signature,
+                         input_at=input_at)
         report.results.append(r)
         if progress is not None:
             progress(r)
@@ -654,6 +693,10 @@ def format_detail(result: InputResult, spec_status: Optional[str] = None) -> str
         i = result.instruction
         out.append(f'  insn:  {i.address:#x}  {i.bytes.hex():<16} {i.text}')
     out.append(f'  ran {result.instructions} instructions in {result.wall_time:.3f}s')
+    if result.input_read:
+        out.append(f'  input read: {format_ranges(result.input_read)}')
+        if result.input_at_fault:
+            out.append(f'  input read here: {format_ranges(result.input_at_fault)}')
     if result.registers:
         names = list(result.registers)
         cells = [f'{n}={result.registers[n]:#x}' for n in names]
@@ -718,6 +761,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--image', help='program image path, for module naming')
     p.add_argument('--start', help='start address override')
     p.add_argument('--end', help='end address override')
+    p.add_argument('--input-at', metavar='ADDR',
+                   help='address the harness writes the input to, if it does '
+                        'not declare INPUT_BASE; enables the input-bytes report')
     p.add_argument('--stack-bytes', type=int, default=DEFAULT_STACK_BYTES,
                    help='bytes of stack captured at the stop')
     p.add_argument('--signature', choices=sorted(SIGNATURES), default='kind-pc',
@@ -751,7 +797,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             start=_addr(args.start), end=_addr(args.end), image=args.image,
             max_instructions=args.max_instructions, timeout=args.timeout,
             stack_bytes=args.stack_bytes, signature=SIGNATURES[args.signature],
-            limit=args.limit, progress=progress)
+            limit=args.limit, progress=progress, input_at=_addr(args.input_at))
     except FileNotFoundError as e:
         print(f'no such input: {e}', file=sys.stderr)
         return 2

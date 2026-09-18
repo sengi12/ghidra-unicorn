@@ -30,6 +30,11 @@ DATA_SIZE_MAX = 0x00010000
 START = CODE_ADDRESS
 END = CODE_ADDRESS + 0xf4          # last instruction of main()
 
+# Where create() puts the fuzz input. Declaring it lets triage report which
+# input bytes a crashing instruction actually read.
+INPUT_BASE = DATA_ADDRESS
+INPUT_SIZE = DATA_SIZE_MAX
+
 
 def _binary_path() -> str:
     env = os.getenv('AFL_UNICORN_DIR')

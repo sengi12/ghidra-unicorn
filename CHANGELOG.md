@@ -46,7 +46,10 @@ Notable changes to ghidra-unicorn. The format follows
   the input were never looked at. It records direct reads rather than
   following values through registers, which is honest about its cost and
   enough for most parsers. Not yet wired to a console command or the triage
-  report.
+  report. Triage uses it: a harness that declares `INPUT_BASE` (or a
+  `--input-at` address) gets an "input read" line per result, naming the
+  offsets that run consumed. On the sample's crashes that is `0, 9-10` for
+  one bug and `20` for another, out of inputs of 11 and 32 bytes.
 
 ### Changed
 
