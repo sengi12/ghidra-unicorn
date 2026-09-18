@@ -6,7 +6,9 @@ the style of gdb/gef: anything that is not a known command is Python, with
 Ghidra exactly like stops caused by Ghidra's own buttons, because both go
 through the target's stop listeners.
 """
+import atexit
 import code
+import os
 import shlex
 import struct
 import sys
@@ -39,9 +41,65 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   k, kill                terminate the target
   q, quit                leave (Ghidra's target is disconnected)
   help, ?                this text
+
+Line editing is readline: arrows for history, Tab to complete, Ctrl-A/E/U/K/W,
+Ctrl-R to search. History is kept in ~/.ghidra_unicorn_history.
+In Ghidra's terminal, copy and paste are Cmd+Shift+C / Cmd+Shift+V on macOS
+(Ctrl+Shift elsewhere); plain Ctrl+C sends an interrupt, as in any xterm.
 """
 
 _UNITS = {'b': 1, 'h': 2, 'w': 4, 'g': 8}
+
+HISTORY_FILE = os.path.expanduser(
+    os.getenv('GHIDRA_UNICORN_HISTORY') or '~/.ghidra_unicorn_history')
+
+# Characters that end a word for completion. Unlike readline's default this
+# keeps '/', '-' and '.' inside a word, so `x/8xw` and `cpsr.M` complete whole.
+COMPLETER_DELIMS = ' \t\n`!@#$%^&*()=+[{]}\\|;:\'",<>?'
+
+
+class _Completer:
+    """Tab completion: our commands first, register names after `r`, else Python."""
+
+    def __init__(self, console: 'UnicornConsole') -> None:
+        self.console = console
+        self.matches: List[str] = []
+
+    def complete(self, text: str, state: int) -> Optional[str]:
+        if state == 0:
+            try:
+                self.matches = self._matches(text)
+            except Exception:
+                self.matches = []
+        return self.matches[state] if state < len(self.matches) else None
+
+    def _matches(self, text: str) -> List[str]:
+        import readline
+        head = readline.get_line_buffer()[:readline.get_begidx()].split()
+        if not head:
+            names = sorted(set(self.console.commands) | {'x/8xw', 'q'})
+            return [n + ' ' for n in names if n.startswith(text)]
+        spec = self.console.target.spec
+        if head[0] in ('r', 'regs'):
+            names = [r.name for r in spec.regs] + [f.name for f in spec.flags]
+            if spec.status:
+                names += [f'{spec.status}.{f.name}' for f in spec.fields]
+            low = text.lower()
+            return [n + ' ' for n in sorted(names) if n.lower().startswith(low)]
+        if head[0] in self.console.commands:
+            return []
+        return self._python(text)
+
+    def _python(self, text: str) -> List[str]:
+        import rlcompleter
+        completer = rlcompleter.Completer(self.console.locals)
+        out, i = [], 0
+        while True:
+            m = completer.complete(text, i)
+            if m is None:
+                return out
+            out.append(m)
+            i += 1
 
 
 class UnicornConsole(code.InteractiveConsole):
@@ -72,6 +130,7 @@ class UnicornConsole(code.InteractiveConsole):
             'fields': self.cmd_fields,
         }
         self.quit = False
+        self._readline = None
 
     # ---- dispatch --------------------------------------------------------
 
@@ -298,10 +357,50 @@ class UnicornConsole(code.InteractiveConsole):
 
     # ---- entry -----------------------------------------------------------
 
+    def setup_readline(self) -> None:
+        """Line editing, history and completion.
+
+        Without this the console is whatever the pty's line discipline does,
+        and Ghidra's terminal sends 0x08 for Backspace while a macOS pty
+        erases on 0x7f - so Backspace would do nothing. readline reads in raw
+        mode and does the editing itself, binding both erase characters.
+        """
+        try:
+            import readline
+        except ImportError:
+            self.write('(no readline module: no line editing, history or completion)\n')
+            return
+        self._readline = readline
+        if 'libedit' in (readline.__doc__ or ''):
+            readline.parse_and_bind('bind ^I rl_complete')
+            readline.parse_and_bind('bind ^H ed-delete-prev-char')
+            readline.parse_and_bind('bind ^? ed-delete-prev-char')
+        else:
+            readline.parse_and_bind('tab: complete')
+            readline.parse_and_bind(r'"\C-h": backward-delete-char')
+            readline.parse_and_bind(r'"\C-?": backward-delete-char')
+        readline.set_completer(_Completer(self).complete)
+        readline.set_completer_delims(COMPLETER_DELIMS)
+        readline.set_history_length(2000)
+        try:
+            readline.read_history_file(HISTORY_FILE)
+        except OSError:
+            pass
+        atexit.register(self.save_history)
+
+    def save_history(self) -> None:
+        if self._readline is None:
+            return
+        try:
+            self._readline.write_history_file(HISTORY_FILE)
+        except OSError:
+            pass
+
     def run(self, banner: Optional[str] = None) -> None:
         if banner is None:
             banner = ('ghidra-unicorn console. Type `help` for commands; anything else is Python. '
                       'Ctrl-D or `q` to leave.')
+        self.setup_readline()
         self.target.listeners.append(self._on_stop)
         try:
             self.ctx.show()
@@ -309,9 +408,16 @@ class UnicornConsole(code.InteractiveConsole):
         except SystemExit:
             pass
         finally:
+            self.save_history()
             if self._on_stop in self.target.listeners:
                 self.target.listeners.remove(self._on_stop)
 
     def _on_stop(self, ev) -> None:
+        """A stop happened - possibly from Ghidra while we sit at the prompt."""
         self.write('\n')
         self.ctx.show(ev)
+        if self._readline is not None:
+            try:
+                self.write(getattr(sys, 'ps1', '>>> ') + self._readline.get_line_buffer())
+            except Exception:
+                pass

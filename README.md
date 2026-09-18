@@ -225,6 +225,56 @@ Flag and field names are the same ones the console's `fields` command lists.
   `reg+off`. Everything else is Python with `target`, `uc`, `commands`.
   Set `NO_COLOR=1` to turn colour off.
 
+### Working in Ghidra's terminal
+
+Ghidra's terminal is a real VT100 emulator, but two things about it surprise
+people:
+
+- **Copy and paste are Cmd+Shift+C / Cmd+Shift+V** on macOS (Ctrl+Shift+C /
+  Ctrl+Shift+V elsewhere). That is deliberate on Ghidra's part: plain Ctrl+C
+  has to stay free to send an interrupt, as in any xterm. Also useful:
+  Cmd+F find, Cmd+A select all, Cmd+= and Cmd+- for font size, and
+  right-click for the same actions in a menu.
+- **Backspace** used to do nothing here. Ghidra's terminal sends `0x08` for
+  the Backspace key, but a macOS pty erases on `0x7f`, so the line
+  discipline ignored it. The console now uses readline and does its own
+  editing, binding both: Backspace, arrow keys, history across sessions
+  (`~/.ghidra_unicorn_history`), Tab completion for commands and register
+  names, Ctrl-A/E/U/K/W and Ctrl-R all work. `tests/test_pty.py` drives a
+  real pty to keep it that way.
+
+### Running the console in your own terminal
+
+If you would rather have iTerm or Terminal.app, with its own scrollback,
+mouse and clipboard, run the connector yourself and connect the two. Either
+direction works; both need `ghidratrace` importable (`pip install
+ghidratrace`, or put `$GHIDRA_INSTALL_DIR/Ghidra/Debug/Debugger-rmi-trace/pypkg/src`
+on `PYTHONPATH`).
+
+**Ghidra listens, you connect.** In Ghidra: **Window → Connections**, then
+the *Connect by Accept* button in that window's toolbar. It shows the address
+it is waiting on. Then, in your terminal:
+
+```
+python -m ghidraunicorn --address 127.0.0.1:12345 \
+    --harness examples/afl_unicorn_simple.py \
+    --input .../sample_inputs/sample1.bin \
+    --image .../simple_target.bin
+```
+
+**You listen, Ghidra connects.** In your terminal:
+
+```
+python -m ghidraunicorn --listen 127.0.0.1:12345 --harness ... --input ...
+```
+
+then in Ghidra's **Connections** window use *Connect Outbound* and give it
+`127.0.0.1:12345`. With no argument, `--listen` picks a free port and prints
+it.
+
+Either way the trace, breakpoints and stepping behave exactly as when Ghidra
+launches the connector; the difference is only which terminal you type in.
+
 Pair it with [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov) to
 paint the fuzzer's coverage over the same listing you are stepping through.
 
@@ -244,7 +294,7 @@ ghidraunicorn/
   __main__.py   entry point: connect, load, publish, then console
 debugger-launchers/local-unicorn.sh   the launcher Ghidra shows in its menu
 examples/      harnesses
-tests/         pytest, no Ghidra needed (58 tests)
+tests/         pytest, no Ghidra needed (61 tests, incl. a real-pty test)
 tools/e2e_ghidra.py   drives a real Ghidra through the whole flow
 tools/setup_project.py  makes a project with the sample imported
 ```

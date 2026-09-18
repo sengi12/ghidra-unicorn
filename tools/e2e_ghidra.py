@@ -44,12 +44,17 @@ def sample_paths():
 
 def wait_until(pred, what: str, timeout: float = 30.0, interval: float = 0.25):
     deadline = time.time() + timeout
+    last = None
     while time.time() < deadline:
-        v = pred()
-        if v:
-            return v
+        try:
+            v = pred()
+            if v:
+                return v
+        except Exception as e:
+            last = e
         time.sleep(interval)
-    raise TimeoutError(f'timed out waiting for {what}')
+    raise TimeoutError(f'timed out waiting for {what}'
+                       + (f' (last error: {last!r})' if last else ''))
 
 
 def run_checks():
@@ -220,13 +225,10 @@ def run_checks():
             m.put(k, v)
         return methods.get(_method).invoke(m)
 
-    s0 = snap()
     invoke('step_into', thread=thread_obj, n=jpype.JLong(1))
-    wait_until(lambda: snap() > s0, 'a snapshot after step', 20)
-    pc1 = reg('pc')
-    assert pc1 == CODE_BASE + 4, hex(pc1)
+    wait_until(lambda: reg('pc') == CODE_BASE + 4, 'step_into to land', 20)
     assert str(value('Processes[0]', 'Reason')).startswith('Stepped'), value('Processes[0]', 'Reason')
-    log(f'step_into OK: pc={pc1:#x}')
+    log(f'step_into OK: pc={reg("pc"):#x}')
 
     invoke('step_over', thread=thread_obj, n=jpype.JLong(2))
     wait_until(lambda: reg('pc') == CODE_BASE + 12, 'step_over x2', 20)
@@ -238,11 +240,10 @@ def run_checks():
     assert str(value('Breakpoints[1]', 'Kinds')) == 'SW_EXECUTE'
     log('breakpoint published')
 
-    s1 = snap()
     invoke('resume', process=proc_obj)
-    wait_until(lambda: snap() > s1 and str(value('Processes[0]', 'State')) == 'STOPPED',
-               'stop at breakpoint', 30)
-    assert reg('pc') == CODE_BASE + 0x40, hex(reg('pc'))
+    wait_until(lambda: reg('pc') == CODE_BASE + 0x40
+               and str(value('Processes[0]', 'State')) == 'STOPPED',
+               'the breakpoint to be hit', 30)
     assert str(value('Processes[0]', 'Reason')).startswith('Breakpoint 1'), value('Processes[0]', 'Reason')
     assert int(value('Breakpoints[1]', 'Hit Count')) == 1
     log(f'resume to breakpoint OK: {value("Processes[0]", "Reason")}')
@@ -259,10 +260,9 @@ def run_checks():
 
     # Resume to the end of main: the harness's END marks the target terminated.
     invoke('delete_breakpoint', breakpoint=obj('Breakpoints[1]'))
-    s2 = snap()
     invoke('resume', process=proc_obj)
-    wait_until(lambda: snap() > s2 and str(value('Processes[0]', 'State')) in ('STOPPED', 'TERMINATED'),
-               'run to end', 60)
+    wait_until(lambda: str(value('Processes[0]', 'State')) == 'TERMINATED',
+               'the target to run to the end', 60)
     state = str(value('Processes[0]', 'State'))
     reason = str(value('Processes[0]', 'Reason'))
     log(f'run to end: state={state} reason={reason} pc={reg("pc"):#x}')
@@ -270,11 +270,74 @@ def run_checks():
     assert state == 'TERMINATED' and reg('pc') in (MAIN_END, MAIN_END - 4), (state, hex(reg('pc')))
 
     result.close()
+
+    check_listen_mode(tool, binary, sample_input)
+
     log('ALL CHECKS PASSED')
     # Do not leave the temp project behind: Ghidra would offer to reopen it.
     import shutil
     gp.close()
     shutil.rmtree(projdir, ignore_errors=True)
+
+
+def free_port() -> int:
+    import socket
+    s = socket.socket()
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def check_listen_mode(tool, binary: str, sample_input: str) -> None:
+    """The external-terminal workflow: the connector listens, Ghidra connects.
+
+    This is what you get when you run ghidraunicorn in your own terminal and
+    use the Connections window's "Connect Outbound" action.
+    """
+    import socket
+    import subprocess
+    import tempfile
+    from java.net import InetSocketAddress
+    from ghidra.app.services import TraceRmiService
+
+    port = free_port()
+    out = tempfile.NamedTemporaryFile('w+', suffix='.log', delete=False)
+    out.close()
+    argv = [sys.executable, '-m', 'ghidraunicorn',
+            '--listen', f'127.0.0.1:{port}',
+            '--harness', HARNESS, '--input', sample_input,
+            '--image', binary, '--no-repl']
+    env = dict(os.environ, PYTHONUNBUFFERED='1')
+    env['PYTHONPATH'] = os.pathsep.join([REPO, env.get('PYTHONPATH', '')]).rstrip(os.pathsep)
+    log(f'listen mode: starting connector on port {port}')
+    with open(out.name, 'w') as fh:
+        proc = subprocess.Popen(argv, stdout=fh, stderr=subprocess.STDOUT, env=env)
+    try:
+        def said(text):
+            with open(out.name) as fh:
+                return text in fh.read()
+
+        wait_until(lambda: said('Listening for Ghidra'), 'the connector to listen', 30)
+        svc = tool.getService(TraceRmiService)
+        conn = svc.connect(InetSocketAddress('127.0.0.1', port))
+        wait_until(lambda: said('Trace started'), 'the connector to publish its trace', 30)
+        names = {str(k) for k in conn.getMethods().all().keySet()}
+        assert 'resume' in names and 'step_into' in names, sorted(names)
+        log(f'listen mode OK: Ghidra connected outbound and sees {len(names)} methods')
+        conn.close()
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+        with open(out.name) as fh:
+            tail = fh.read()[-300:]
+        os.unlink(out.name)
+        if proc.returncode not in (0, None, -15):
+            log(f'connector exited {proc.returncode}; tail: {tail!r}')
 
 
 def worker():

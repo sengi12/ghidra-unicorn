@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
                                 description='Unicorn back-end for the Ghidra Debugger (Trace RMI)')
     p.add_argument('--address', default=_env('GHIDRA_TRACE_RMI_ADDR'),
                    help='host:port of the Ghidra Trace RMI acceptor (GHIDRA_TRACE_RMI_ADDR)')
+    p.add_argument('--listen', nargs='?', const='127.0.0.1:0', default=None,
+                   metavar='[HOST:]PORT',
+                   help='instead of connecting, wait for Ghidra to connect to us '
+                        '(its Connections window -> Connect Outbound)')
     p.add_argument('--harness', default=_env('OPT_HARNESS'),
                    help='Python harness defining create(input_file) -> Uc (OPT_HARNESS)')
     p.add_argument('--context', default=_env('OPT_CONTEXT_DIR'),
@@ -104,6 +108,10 @@ class _Tee:
     def isatty(self):
         return self.streams[0].isatty()
 
+    def fileno(self):
+        # input() only uses readline when stdout has a real fd.
+        return self.streams[0].fileno()
+
 
 def main(argv=None) -> int:
     logfile = os.getenv('GHIDRA_UNICORN_LOG')
@@ -112,8 +120,9 @@ def main(argv=None) -> int:
         sys.stdout = _Tee(sys.stdout, f)
         sys.stderr = _Tee(sys.stderr, f)
     args = build_parser().parse_args(argv)
-    if not args.address:
-        raise SystemExit('No Ghidra address: set GHIDRA_TRACE_RMI_ADDR or pass --address')
+    if not args.address and args.listen is None:
+        raise SystemExit('No Ghidra address: set GHIDRA_TRACE_RMI_ADDR, pass --address, '
+                         'or pass --listen to wait for Ghidra to connect')
 
     loaded = load(args)
     commands.STATE.loaded = loaded
@@ -121,16 +130,19 @@ def main(argv=None) -> int:
     target = loaded.target
     print(f'Loaded {loaded.description}: {target.spec.key} ({target.spec.language}), '
           f'pc={target.pc():#x} sp={target.sp():#x}, '
-          f'{len(target.regions())} regions, {len(loaded.modules)} modules')
+          f'{len(target.regions())} regions, {len(loaded.modules)} modules', flush=True)
 
-    commands.connect(args.address)
+    if args.listen is not None:
+        commands.listen(args.listen)
+    else:
+        commands.connect(args.address)
     commands.start_trace()
     hooks.install(target)
     with commands.batched_tx('Launch'):
         commands.snapshot('Launched')
         commands.put_all(preload=_bool(args.preload, True), preload_cap=args.preload_cap)
     commands.activate()
-    print('Trace started. Ghidra is now driving the emulator.')
+    print('Trace started. Ghidra is now driving the emulator.', flush=True)
 
     if args.no_repl or not sys.stdin.isatty():
         _wait_for_disconnect()

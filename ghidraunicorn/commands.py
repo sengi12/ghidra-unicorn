@@ -114,7 +114,35 @@ def connect(address: str) -> Client:
     s = socket.socket()
     s.connect((host, int(port)))
     STATE.client = Client(s, 'unicorn', methods.REGISTRY)
-    print(f'Connected to {STATE.client.description} at {address}')
+    print(f'Connected to {STATE.client.description} at {address}', flush=True)
+    return STATE.client
+
+
+def listen(address: str = '127.0.0.1:0') -> Client:
+    """Wait for Ghidra to connect to us (its "Connect Outbound" action).
+
+    The opposite of connect(): useful when the connector runs in your own
+    terminal rather than one Ghidra spawned.
+    """
+    from . import methods
+    if STATE.client is not None:
+        raise RuntimeError('Already connected')
+    if ':' in address:
+        host, port = address.rsplit(':', 1)
+    else:
+        host, port = '127.0.0.1', address
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, int(port)))
+    host, port = s.getsockname()
+    s.listen(1)
+    print(f'Listening for Ghidra at {host}:{port}', flush=True)
+    print(f'In Ghidra: Window -> Connections -> Connect Outbound -> {host}:{port}',
+          flush=True)
+    conn, peer = s.accept()
+    s.close()
+    STATE.client = Client(conn, 'unicorn', methods.REGISTRY)
+    print(f'Connected to {STATE.client.description} from {peer[0]}:{peer[1]}', flush=True)
     return STATE.client
 
 
