@@ -211,15 +211,18 @@ Each of these has a regression test; do not undo them.
 Two things in it were written without a Ghidra to try them against, because
 the session that wrote them had none, and both are marked `[~]` rather than
 done: the p-code half of `differential.py` with `tools/differential.py`, and
-the context panel. Their untested halves are clearly separated from the
-tested ones - the comparison machinery in `differential.py` is covered by
-running Unicorn against Unicorn - so what needs checking is only the Ghidra
-API calls. Run each once on a machine with Ghidra 12.1.3 before trusting
-them. The two items
-needing a running Ghidra - the context panel and differential execution
-against the p-code emulator - are last. The two items needing a
-running Ghidra - the context panel and differential execution against the
-p-code emulator - are last.
+the context panel. Their untested halves are kept apart from the tested ones
+- the comparison machinery in `differential.py` is covered by running
+Unicorn against Unicorn, and the panel's renderer by rendering the same
+state through both a target and a plain object - so what is left unchecked
+is only the Ghidra API calls.
+
+Those calls have since been read against Ghidra's own source and a real
+JPype, which found four mistakes including one that made the panel
+unrunnable, but read is not run. **Run each once on a machine with Ghidra
+12.1.3 and then mark them done.** `tools/e2e_ghidra.py` wants a run too:
+this branch changed `schema.xml`, `putreg` and `put_breakpoints`, and that
+script is the only thing that proves the protocol still works.
 
 `examples/syscalls_and_stubs.py` is the shortest way to see the system call
 and stub layers working: it reads, allocates, measures, prints and exits with
