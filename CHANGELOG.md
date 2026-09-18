@@ -9,6 +9,25 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Differential execution against Ghidra's p-code emulator**, in
+  `differential.py`: both engines are put in the same state, stepped in
+  lockstep, and compared after every instruction, with the first
+  disagreement reported as the step, the instruction, and the registers that
+  differ with the xor of each pair. Unicorn and the p-code emulator
+  implement the same instruction sets from completely separate descriptions
+  of them, so a disagreement is a bug in one of them - and a check on this
+  connector's own tables, since a register name mapped to the wrong register
+  never matches. No mapping table is needed between the two, because
+  `arch.py` already names every register the way Ghidra's SLEIGH
+  specification does.
+
+  The comparison is tested by running Unicorn against Unicorn, with engines
+  deliberately made to disagree in each of the ways they can, so that a
+  comparison unable to report anything cannot pass. **The p-code half and
+  `tools/differential.py` have not yet been run against a real Ghidra**;
+  they were written on a machine that had none, and want one run against the
+  afl-unicorn sample before they are trusted.
+
 - **Preloading is region-aware.** The cap was applied to the regions in
   address order, and the first region that did not fit stopped the loop
   outright, so a dump with a large heap low in the address space filled the

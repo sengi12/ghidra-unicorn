@@ -340,6 +340,27 @@ stops reproducing.
 `--commands-file` reads the same thing from a file. Commands split on
 newlines and semicolons, quotes are respected, and `#` starts a comment.
 
+## Checking one emulator against the other
+
+Unicorn and Ghidra's p-code emulator implement the same instruction sets
+from entirely separate descriptions of them, so where they disagree about
+what an instruction did, one of them is wrong:
+
+```
+GHIDRA_INSTALL_DIR=... python tools/differential.py \
+    --harness examples/afl_unicorn_simple.py \
+    --program simple_target.bin --language MIPS:BE:32:default \
+    --base 0x100000 --steps 500
+```
+
+Both engines are put in the same state, stepped together, and compared after
+every instruction; the first disagreement is reported with the instruction
+and the registers that differ. It needs no mapping between the two, because
+the register names in `arch.py` are already Ghidra's.
+
+The p-code half has not yet been run against a real Ghidra - see
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Recording a session
 
 `--record session.gu`, or `record session.gu` in the console, logs

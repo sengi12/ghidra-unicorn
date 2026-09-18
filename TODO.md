@@ -14,10 +14,13 @@ These two need a running Ghidra to build against, so they are last.
   the gef-style register, pointer-chain and stack view in a window instead of
   the terminal. It needs nothing new on the Python side: everything it would
   draw is already in the trace.
-- [ ] **Differential execution against Ghidra's p-code emulator.** Run the
-  same program under both engines and compare registers each step. A
-  disagreement is a bug in a SLEIGH specification or in Unicorn, which makes
-  this a useful test as well as a research tool.
+- [~] **Differential execution against Ghidra's p-code emulator.** The
+  comparison is written and tested (`differential.py`, Unicorn against
+  Unicorn, with deliberate divergences so the machinery is shown to be able
+  to fail). The p-code side and `tools/differential.py` are written but have
+  not been run against a real Ghidra yet - there was none on the machine
+  they were written on. Run it once on a machine with one, against the
+  afl-unicorn sample, before calling this done.
 
 ## Known bugs
 
