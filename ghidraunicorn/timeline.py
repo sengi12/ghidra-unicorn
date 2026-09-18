@@ -274,8 +274,17 @@ class Timeline:
         if not regions:
             return
         want = {(s, e): p for s, e, p in regions}
+        base = self.base
+        # Regions the *base* holds have an image in `base.pages` to be
+        # restored from. Regions that appeared later have no baseline
+        # anywhere, so nothing below would overwrite a byte written into one
+        # after the checkpoint being restored - the write would survive the
+        # rewind. Taking such a region down and putting it back gives the
+        # zeroed pages Unicorn maps, which is what it held when it appeared;
+        # the deltas then put back whatever should be in it at this point.
+        baseline = {(s, e) for s, e, _ in ((base.regions or []) if base else [])}
         for start, end, _ in list(self.uc.mem_regions()):
-            if (start, end) not in want:
+            if (start, end) not in want or (start, end) not in baseline:
                 try:
                     self.uc.mem_unmap(start, end - start + 1)
                 except UcError:

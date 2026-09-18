@@ -426,7 +426,10 @@ class UnicornConsole(code.InteractiveConsole):
                        'has no table)\n')
             return
         self.write(layer.describe() + '\n')
-        recent = layer.records[-(int(args[1], 0) if len(args) > 1 else 10):]
+        count = int(args[1], 0) if len(args) > 1 else 10
+        # `records[-0:]` is the whole list, which is the opposite of what
+        # `sys 0` asks for.
+        recent = layer.records[-count:] if count > 0 else []
         for rec in recent:
             self.write(f'  {rec.icount:>10}  {rec.describe()}\n')
         if not recent:

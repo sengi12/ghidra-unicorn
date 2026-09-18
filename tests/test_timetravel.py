@@ -654,3 +654,33 @@ def test_without_capstone_a_reverse_step_over_is_a_reverse_step():
     assert t.icount == 7
     t.step_back_over()
     assert t.icount == 6, 'with no decoder it should be a plain step back'
+
+
+def test_a_write_into_a_region_mapped_at_run_time_is_rewound():
+    """A region that appeared after the base checkpoint has no image in it,
+    so nothing used to overwrite a byte written into it and the write
+    survived the rewind. Mapping and heap regions are exactly that."""
+    t = make_tt(interval=2)
+    t.step(2)
+    t.uc.mem_map(0x9000, 0x1000)              # appears at instruction 2
+    t.step(2)
+    t.write(0x9000, b'later')                 # written at instruction 4
+    t.step(2)
+    assert t.read(0x9000, 5) == b'later'
+    t.goto_icount(3)                          # after the map, before the write
+    assert 0x9000 in regions_of(t), 'the region itself should still be there'
+    assert t.read(0x9000, 5) == b'\0' * 5, 'the write outlived the rewind'
+
+
+def test_a_region_mapped_at_run_time_keeps_what_it_should_have():
+    """The other half: a write made *before* the point restored to has to
+    come back, not be zeroed along with everything else."""
+    t = make_tt(interval=1)
+    t.step(1)
+    t.uc.mem_map(0x9000, 0x1000)
+    t.write(0x9000, b'kept')                  # instruction 1
+    t.step(3)
+    t.write(0x9000 + 0x10, b'later')          # instruction 4
+    t.goto_icount(3)
+    assert t.read(0x9000, 4) == b'kept'
+    assert t.read(0x9000 + 0x10, 5) == b'\0' * 5

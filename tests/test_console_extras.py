@@ -250,3 +250,53 @@ def test_a_register_watch_is_not_published_to_ghidra():
     assert commands.STATE.trace is None      # nothing to publish to here
     kinds = [b.kind for b in t.breakpoints.values()]
     assert REGISTER in kinds and 'SW_EXECUTE' in kinds
+
+
+def test_a_register_watch_fires_while_stepping():
+    """The check has to happen before the instruction budget ends the run,
+    or a step never notices the change and never refreshes what it compares
+    against - and the next run then reports it somewhere else entirely."""
+    t = make_x64()
+    bp = t.add_register_watch('RAX')
+    ev = t.step()                             # `mov rax, 1` changes it
+    assert ev.reason == 'step', 'the change is only visible at the next hook'
+    ev = t.step()
+    assert ev.reason == 'watchpoint' and ev.breakpoint is bp
+    assert '0x0 -> 0x1' in ev.description
+
+
+def test_every_change_is_reported_once_and_in_order():
+    """`mov rax, 1`, `inc rax`, `inc rax`: three changes, three stops, and
+    no stop reported twice.
+
+    A change is noticed at the hook for the instruction *after* the one that
+    made it, which is where a memory watchpoint stops too, so the stop
+    itself makes no progress and the step after it carries on.
+    """
+    t = make_x64()
+    bp = t.add_register_watch('RAX')
+    seen = []
+    for _ in range(6):
+        ev = t.step()
+        if ev.reason == 'watchpoint':
+            seen.append(ev.description.split(': ')[1])
+    assert seen == ['RAX 0x0 -> 0x1', 'RAX 0x1 -> 0x2', 'RAX 0x2 -> 0x3']
+    assert bp.hit_count == 3
+
+
+def test_a_run_after_a_step_picks_up_where_it_left_off():
+    t = make_x64()
+    bp = t.add_register_watch('RAX')
+    t.step(2)                                 # stops at the first change
+    assert bp.hit_count == 1 and t.reg_read('RAX') == 1
+    ev = t.run()
+    assert ev.reason == 'watchpoint' and '0x1 -> 0x2' in ev.description
+
+
+def test_asking_for_no_syscalls_shows_none():
+    """`records[-0:]` is the whole list, which is the opposite of `sys 0`."""
+    from ghidraunicorn import syscalls
+    t, c, out = make_console()
+    syscalls.install(t)
+    c.push('sys 0')
+    assert 'nothing called yet' in out.getvalue()

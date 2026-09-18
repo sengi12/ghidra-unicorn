@@ -275,10 +275,15 @@ def install_layers(loaded: Loaded, harness=None, *, syscalls: bool = True,
         # A raw binary has no symbol table, so a harness may name the
         # addresses itself: STUBS_AT = {'malloc': 0x400800}.
         for name, address in (getattr(harness, 'STUBS_AT', None) or {}).items():
+            # A typo in a harness's own table must not stop the launch: say
+            # which one and carry on, because everything else still works.
             try:
-                layer.bind(name, _parse_addr(address))
-            except KeyError:
-                pass
+                where = _parse_addr(address)
+                if where is None:
+                    raise ValueError(f'no address for {name}')
+                layer.bind(name, where)
+            except (KeyError, ValueError, TypeError) as e:
+                print(f'STUBS_AT: not binding {name}: {e}', flush=True)
         # With no symbols nothing is bound, and an empty stub layer is just
         # overhead; keep it anyway so a person can bind by hand from the
         # console, which is the whole point of having it there.

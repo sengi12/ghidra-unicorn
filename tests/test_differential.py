@@ -236,3 +236,25 @@ def test_a_divergence_of_only_the_program_counter_is_flagged():
     assert d.only_pc
     d.registers['RAX'] = (3, 4)
     assert not d.only_pc
+
+
+def test_an_engine_that_simply_stops_ends_the_comparison_cleanly():
+    """A target reaching its end address raises TargetError, which is not a
+    disagreement and must not come out of `compare` as an exception."""
+    from ghidraunicorn.target import TargetError
+
+    class Ends(UnicornEngine):
+        def step(self):
+            raise TargetError('target has terminated')
+
+    result = compare(UnicornEngine(make_x64()), Ends(make_x64()), steps=5)
+    assert result.agreed and 'terminated' in result.stopped
+
+
+def test_a_target_that_reaches_its_end_stops_the_comparison():
+    a = UnicornEngine(make_x64(end=0x100a))
+    b = UnicornEngine(make_x64(end=0x100a))
+    for engine in (a, b):
+        engine.target.run()                  # both sit at the end, terminated
+    result = compare(a, b, steps=5)
+    assert result.agreed and result.stopped

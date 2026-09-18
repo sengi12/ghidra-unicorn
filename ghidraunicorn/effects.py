@@ -70,15 +70,21 @@ class EffectLog:
 
     `snapshot` and `restore` are the layer's own state: called with no
     arguments to capture, and with what was captured to put it back.
+    `forget`, if given, is called with the oldest snapshot still reachable
+    whenever entries are dropped - or with None when none are left - so that
+    a layer keeping an undo journal can throw away the part of it that can
+    never be reached again.
     """
 
     def __init__(self, target, name: str,
                  snapshot: Optional[Callable[[], object]] = None,
-                 restore: Optional[Callable[[object], None]] = None) -> None:
+                 restore: Optional[Callable[[object], None]] = None,
+                 forget: Optional[Callable[[object], None]] = None) -> None:
         self.target = target
         self.name = name
         self._snapshot = snapshot
         self._restore = restore
+        self._forget = forget
         self.entries: List[Effect] = []
         self._by_icount: Dict[int, Effect] = {}
         self._current: Optional[Effect] = None
@@ -194,8 +200,12 @@ class EffectLog:
         log the one thing in the process that grows with the length of the
         run rather than with the size of the history.
         """
+        dropped = False
         while self.entries and self.entries[0].icount < earliest:
             self._by_icount.pop(self.entries.pop(0).icount, None)
+            dropped = True
+        if dropped and self._forget is not None:
+            self._forget(self.entries[0].before if self.entries else None)
 
     # ---- reporting -------------------------------------------------------
 

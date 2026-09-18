@@ -212,8 +212,13 @@ def compare(a: Engine, b: Engine, steps: int = 1000, *,
         try:
             a.step()
             b.step()
-        except EngineError as e:
-            result.stopped = str(e)
+        except Exception as e:
+            # Not just EngineError: an engine stops for all sorts of reasons
+            # that are not a disagreement - reaching its end address, running
+            # out of mapped memory - and none of them should come out of a
+            # comparison as an exception. Where it stopped is the answer.
+            result.stopped = f'{type(e).__name__}: {e}' \
+                if not isinstance(e, EngineError) else str(e)
             break
         result.steps = step
         differences = _differences(a, b, shared, watch)

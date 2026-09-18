@@ -502,6 +502,20 @@ class UnicornTarget:
             self._halting = True
             uc.emu_stop()
             return
+        # Before the first-instruction exemption and before the instruction
+        # budget, because a register watch reports a change the *previous*
+        # instruction made and this hook is the only place it is ever seen.
+        # `step` is a run of one instruction each time, so every instruction
+        # is a first one and every stop is the budget: checking after either
+        # meant a watch that never fired while stepping, and a stale value to
+        # compare against when something finally did run.
+        if self._reg_watches:
+            changed = self._changed_register(address)
+            if changed is not None:
+                self._stop = changed
+                self._halting = True
+                uc.emu_stop()
+                return
         if self._first:
             self._first = False
             self.timeline.note_instruction()
@@ -523,13 +537,6 @@ class UnicornTarget:
             self._halting = True
             uc.emu_stop()
             return
-        if self._reg_watches:
-            changed = self._changed_register(address)
-            if changed is not None:
-                self._stop = changed
-                self._halting = True
-                uc.emu_stop()
-                return
         bp = self._bp_by_addr.get(address)
         if bp is not None and bp.enabled and self._triggers(bp):
             self._stop = StopEvent('breakpoint', address,

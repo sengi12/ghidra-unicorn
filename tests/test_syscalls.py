@@ -362,3 +362,49 @@ def test_describe_summarises_what_happened():
 def _signed(value, bits=64):
     value &= (1 << bits) - 1
     return value - (1 << bits) if value >> (bits - 1) else value
+
+
+# ---- the argument-block form of mmap --------------------------------------
+
+def test_old_mmap_reads_its_arguments_from_a_block_not_registers():
+    """i386 and m68k number 90 takes one pointer to six words. Dispatching
+    it like the register form would read the arguments from nowhere."""
+    t, s, out = make(sysprog(RAX=0, RDI=DATA))
+    # struct mmap_arg_struct { addr, len, prot, flags, fd, offset }
+    block = b''.join(v.to_bytes(8, 'little') for v in
+                     (0, 0x2000, 3, 0x22, (1 << 64) - 1, 0))
+    t.write(DATA, block)
+    s.handlers['old_mmap'] = syscalls.HANDLERS['old_mmap']
+    result = s.handlers['old_mmap'](s, [DATA, 0, 0, 0, 0, 0])
+    assert result == s.mmap_base and s.mapped(result, 0x2000)
+
+
+def test_old_mmap_with_a_bad_block_is_efault():
+    t, s, out = make(sysprog(RAX=39))
+    with pytest.raises(syscalls.SyscallError) as e:
+        syscalls.HANDLERS['old_mmap'](s, [0xdead0000, 0, 0, 0, 0, 0])
+    assert e.value.name == 'EFAULT'
+
+
+def test_the_tables_that_have_old_mmap_are_the_ones_that_should():
+    assert abi.syscall_abi('x86').numbers['old_mmap'] == 90
+    assert abi.syscall_abi('m68k').numbers['old_mmap'] == 90
+    assert 'mmap' not in abi.syscall_abi('x86').numbers
+    # arm leaves 90 out entirely; ppc and the 64-bit tables use the
+    # register-argument form at their own numbers.
+    assert 'old_mmap' not in abi.syscall_abi('armle').numbers
+    assert abi.syscall_abi('ppc32').numbers['mmap'] == 90
+    assert abi.syscall_abi('x64').numbers['mmap'] == 9
+
+
+def test_writev_refuses_a_wild_count():
+    t, s, out = make(sysprog(RAX=20, RDI=1, RSI=DATA, RDX=0x7fffffff))
+    run(t)
+    assert _signed(t.reg_read('RAX')) == -syscalls.ERRNO['EINVAL']
+
+
+def test_a_wild_write_length_is_efault_not_a_crash():
+    t, s, out = make(sysprog(RAX=1, RDI=1, RSI=DATA, RDX=0x7fffffff))
+    run(t)
+    assert _signed(t.reg_read('RAX')) == -syscalls.ERRNO['EFAULT']
+    assert not t.terminated, 'the emulator was brought down by a bad length'

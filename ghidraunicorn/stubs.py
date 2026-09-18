@@ -62,6 +62,14 @@ HEAP_BASE = {32: 0x5000_0000, 64: 0x5000_0000_0000}
 HEAP_SIZE = 32 << 20
 
 
+#: No stub moves or compares more than this in one call. A length larger
+#: than any plausible buffer is a wild argument - a register nobody set, a
+#: size back from a function nobody stubbed - and asking for a buffer that
+#: big is a worse answer than saying no. The system call layer has the same
+#: limit for the same reason.
+MAX_TRANSFER = 1 << 30
+
+
 class StubError(Exception):
     """A stub that cannot do what it was asked."""
 
@@ -81,6 +89,10 @@ class Heap:
     when a later request fits it. That keeps a use-after-free reading the
     bytes it had, which is usually what a person looking at a crash wants to
     see.
+
+    Finding a block to reuse is a scan of the free list, which is the usual
+    cost of first fit and is the one thing here that grows with the number
+    of freed blocks. Snapshotting is not: see `snapshot` below.
     """
 
     def __init__(self, base: int, size: int) -> None:
@@ -90,16 +102,51 @@ class Heap:
         self.mapped = base         # first address not yet mapped
         self.blocks: Dict[int, Block] = {}
         self.freed: Dict[int, Block] = {}
+        #: What each operation did, so that it can be undone. A snapshot is
+        #: a position in here rather than a copy of the tables: copying them
+        #: on every allocation makes a loop of allocations cost the square
+        #: of their number, and a loop of allocations is exactly the sort of
+        #: programme this exists to run.
+        self._journal: List[Tuple] = []
+        self._dropped = 0          # journal entries thrown away
 
-    # The allocator's whole state, for a rewind to put back. The mapping
-    # itself is rewound by the timeline and the effect log.
+    # The allocator's state, for a rewind to put back. The mapping itself is
+    # rewound by the timeline and the effect log.
+
+    @property
+    def _mark(self) -> int:
+        return self._dropped + len(self._journal)
+
     def snapshot(self) -> tuple:
-        return (self.top, self.mapped,
-                {a: Block(b.address, b.size, b.capacity) for a, b in self.blocks.items()},
-                {a: Block(b.address, b.size, b.capacity) for a, b in self.freed.items()})
+        """Where in the journal we are. Constant time, whatever is allocated."""
+        return (self.top, self.mapped, self._mark)
 
     def restore(self, snap: tuple) -> None:
-        self.top, self.mapped, self.blocks, self.freed = snap
+        top, mapped, mark = snap
+        while self._mark > mark and self._journal:
+            self._undo(self._journal.pop())
+        self.top, self.mapped = top, mapped
+
+    def forget(self, snap: Optional[tuple]) -> None:
+        """Drop the journal nothing can reach any more.
+
+        `snap` is the oldest snapshot still held, or None when there are
+        none: everything before it can never be undone, so it can go.
+        """
+        keep = (snap[2] if snap is not None else self._mark) - self._dropped
+        if keep > 0:
+            del self._journal[:keep]
+            self._dropped += keep
+
+    def _undo(self, entry: Tuple) -> None:
+        what, address, size, capacity = entry[0], entry[1], entry[2], entry[3]
+        if what == 'alloc':
+            self.blocks.pop(address, None)
+            if entry[4]:                    # it came off the free list
+                self.freed[address] = Block(address, size, capacity)
+        else:                               # 'free'
+            self.freed.pop(address, None)
+            self.blocks[address] = Block(address, size, capacity)
 
     def _fit(self, want: int) -> Optional[Block]:
         best = None
@@ -113,15 +160,18 @@ class Heap:
         want = max((size + ALIGN - 1) & ~(ALIGN - 1), ALIGN)
         reused = self._fit(want)
         if reused is not None:
+            was = (reused.address, reused.size, reused.capacity)
             del self.freed[reused.address]
             reused.size = size
             self.blocks[reused.address] = reused
+            self._journal.append(('alloc',) + was + (True,))
             return reused, self.mapped
         if self.top + want > self.base + self.size:
             raise StubError('out of heap')
         block = Block(self.top, size, want)
         self.top += want
         self.blocks[block.address] = block
+        self._journal.append(('alloc', block.address, size, want, False))
         need = (self.top + PAGE - 1) & ~(PAGE - 1)
         return block, need
 
@@ -130,6 +180,7 @@ class Heap:
         if block is None:
             raise StubError(f'free of {address:#x}, which is not an allocated block')
         self.freed[address] = block
+        self._journal.append(('free', address, block.size, block.capacity))
         return block
 
     def describe(self) -> str:
@@ -161,7 +212,8 @@ class Stubs:
         self.trace = trace
         bits = self.spec.bits
         self.heap = Heap(HEAP_BASE[bits] if heap_base is None else heap_base, heap_size)
-        self.log = EffectLog(target, 'stubs', self.heap.snapshot, self.heap.restore)
+        self.log = EffectLog(target, 'stubs', self.heap.snapshot,
+                             self.heap.restore, self.heap.forget)
         self.implementations: Dict[str, Callable[['Stubs', List[int]], Optional[int]]] = \
             dict(IMPLEMENTATIONS)
         #: address -> name of what is bound there.
@@ -294,6 +346,8 @@ class Stubs:
     # ---- what an implementation works with -------------------------------
 
     def read(self, address: int, size: int) -> bytes:
+        if size < 0 or size > MAX_TRANSFER:
+            raise StubError(f'refusing to read {size} bytes at {address:#x}')
         return self.target.read(address, size)
 
     def write(self, address: int, data: bytes) -> None:
@@ -401,6 +455,8 @@ def _memmove(s: Stubs, a: List[int]) -> int:
 
 def _memset(s: Stubs, a: List[int]) -> int:
     dst, value, n = a[0], a[1] & 0xff, a[2]
+    if n > MAX_TRANSFER:
+        raise StubError(f'refusing to set {n} bytes at {dst:#x}')
     if n:
         s.write(dst, bytes([value]) * n)
     return dst
@@ -422,6 +478,8 @@ def _strcpy(s: Stubs, a: List[int]) -> int:
 
 def _strncpy(s: Stubs, a: List[int]) -> int:
     dst, n = a[0], a[2]
+    if n > MAX_TRANSFER:
+        raise StubError(f'refusing to write {n} bytes at {dst:#x}')
     src = s.read_cstring(a[1])[:n]
     # strncpy pads to n with NULs and does not terminate if it does not fit.
     s.write(dst, src + b'\0' * (n - len(src)))

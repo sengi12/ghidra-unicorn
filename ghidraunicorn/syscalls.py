@@ -427,11 +427,19 @@ def sys_write(s: Syscalls, args: List[int]) -> int:
     return len(data)
 
 
+#: Linux's own limit on how many buffers one `writev` may carry.
+IOV_MAX = 1024
+
+
 def sys_writev(s: Syscalls, args: List[int]) -> int:
     fd, iov, count = args[0], args[1], args[2]
     f = s.file(fd)
     if not f.writable:
         raise SyscallError('EBADF')
+    if count < 0 or count > IOV_MAX:
+        # A wild count would otherwise be walked a million entries at a time
+        # inside one call, with the emulator stopped the whole while.
+        raise SyscallError('EINVAL')
     size = s.spec.ptr_size
     total = 0
     for i in range(count):
@@ -505,6 +513,22 @@ def sys_mmap(s: Syscalls, args: List[int]) -> int:
     return start
 
 
+def sys_old_mmap(s: Syscalls, args: List[int]) -> int:
+    """i386 and m68k number 90: one pointer to six words, not six registers.
+
+    `struct mmap_arg_struct { unsigned long addr, len, prot, flags, fd,
+    offset; }`. Reading it and handing the words to the ordinary handler is
+    the whole difference between the two.
+    """
+    block = args[0]
+    size = s.spec.ptr_size
+    try:
+        words = [s.read_word(block + i * size) for i in range(6)]
+    except UcError:
+        raise SyscallError('EFAULT')
+    return sys_mmap(s, words)
+
+
 def sys_munmap(s: Syscalls, args: List[int]) -> int:
     addr, length = args[0], args[1]
     start = addr & ~(PAGE - 1)
@@ -550,6 +574,7 @@ HANDLERS: Dict[str, Callable[[Syscalls, List[int]], int]] = {
     'read': sys_read, 'write': sys_write, 'writev': sys_writev,
     'open': sys_open, 'openat': sys_openat, 'close': sys_close,
     'lseek': sys_lseek, 'mmap': sys_mmap, 'mmap2': sys_mmap,
+    'old_mmap': sys_old_mmap,
     'munmap': sys_munmap, 'brk': sys_brk, 'getpid': sys_getpid,
     'exit': sys_exit, 'exit_group': sys_exit,
 }

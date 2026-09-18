@@ -39,10 +39,15 @@ _NR_X86_64 = {'read': 0, 'write': 1, 'open': 2, 'close': 3, 'lseek': 8,
               'mmap': 9, 'munmap': 11, 'brk': 12, 'writev': 20, 'getpid': 39,
               'exit': 60, 'exit_group': 231, 'openat': 257}
 
-# i386: arch/x86/entry/syscalls/syscall_32.tbl
+# i386: arch/x86/entry/syscalls/syscall_32.tbl. Number 90 is `sys_old_mmap`,
+# which takes one pointer to a block of six words rather than six registers,
+# so it gets its own handler; 192 is the register-argument `mmap2`. Wiring 90
+# to the ordinary mmap would read the arguments out of the wrong place
+# entirely - the same trap the arm table avoids by leaving 90 out.
 _NR_I386 = {'exit': 1, 'read': 3, 'write': 4, 'open': 5, 'close': 6,
-            'lseek': 19, 'getpid': 20, 'brk': 45, 'mmap': 90, 'munmap': 91,
-            'writev': 146, 'mmap2': 192, 'exit_group': 252, 'openat': 295}
+            'lseek': 19, 'getpid': 20, 'brk': 45, 'old_mmap': 90,
+            'munmap': 91, 'writev': 146, 'mmap2': 192, 'exit_group': 252,
+            'openat': 295}
 
 # arm, EABI: arch/arm/tools/syscall.tbl. There is deliberately no `mmap`
 # here: number 90 is OABI's old_mmap, which an EABI binary never issues.
@@ -69,14 +74,18 @@ _NR_MIPS_N64 = {'read': 5000, 'write': 5001, 'open': 5002, 'close': 5003,
                 'exit_group': 5205, 'openat': 5247}
 
 # powerpc, 32 and 64 share one table: arch/powerpc/kernel/syscalls/syscall.tbl
+# PowerPC came late enough that its 90 is the register-argument `sys_mmap`,
+# not the `old_mmap` that i386 and m68k have at the same number.
 _NR_PPC = {'exit': 1, 'read': 3, 'write': 4, 'open': 5, 'close': 6,
            'lseek': 19, 'getpid': 20, 'brk': 45, 'mmap': 90, 'munmap': 91,
            'writev': 146, 'mmap2': 192, 'exit_group': 234, 'openat': 286}
 
-# m68k: arch/m68k/kernel/syscalls/syscall.tbl
+# m68k: arch/m68k/kernel/syscalls/syscall.tbl. 90 is `sys_old_mmap` here
+# too, as it is on every port old enough to have had it.
 _NR_M68K = {'exit': 1, 'read': 3, 'write': 4, 'open': 5, 'close': 6,
-            'lseek': 19, 'getpid': 20, 'brk': 45, 'mmap': 90, 'munmap': 91,
-            'writev': 146, 'mmap2': 192, 'exit_group': 247, 'openat': 322}
+            'lseek': 19, 'getpid': 20, 'brk': 45, 'old_mmap': 90,
+            'munmap': 91, 'writev': 146, 'mmap2': 192, 'exit_group': 247,
+            'openat': 322}
 
 
 # ---------------------------------------------------------------------------

@@ -390,3 +390,71 @@ def _bare():
     """A stub layer with memory to work on and nothing bound."""
     t, st, out = make(callprog())
     return st
+
+
+def test_a_wild_length_is_refused_rather_than_allocated_for():
+    """A length out of a register nobody set would otherwise ask Python for
+    a buffer of that size."""
+    st = _bare()
+    with pytest.raises(StubError, match='refusing'):
+        st.implementations['memset'](st, [DATA, 0, 1 << 40, 0, 0, 0])
+    with pytest.raises(StubError, match='refusing'):
+        st.read(DATA, 1 << 40)
+
+
+def test_a_wild_length_through_a_bound_stub_returns_rather_than_crashing():
+    t, st, out = make(callprog(LIB, arg=DATA))
+    st.bind('memset', LIB)
+    t.reg_write('RSI', 0)
+    t.reg_write('RDX', 1 << 40)
+    run(t)
+    assert t.pc() > CODE and not t.terminated
+
+
+def test_a_heap_snapshot_is_a_position_not_a_copy():
+    """A malloc loop used to cost the square of the number of blocks,
+    because every call copied the whole table."""
+    st = _bare()
+    for _ in range(2000):
+        st.malloc(16)
+    snap = st.heap.snapshot()
+    assert snap == (st.heap.top, st.heap.mapped, 2000)
+    st.heap.restore(snap)
+    assert len(st.heap.blocks) == 2000
+    assert all(isinstance(b, stubs.Block) for b in st.heap.blocks.values())
+
+
+def test_the_journal_is_dropped_once_nothing_can_reach_it():
+    st = _bare()
+    for _ in range(50):
+        st.malloc(16)
+    assert len(st.heap._journal) == 50
+    st.heap.forget(None)                   # nothing holds a snapshot any more
+    assert st.heap._journal == [] and st.heap._dropped == 50
+    # A snapshot taken now still works against the shortened journal.
+    snap = st.heap.snapshot()
+    st.malloc(16)
+    st.heap.restore(snap)
+    assert len(st.heap.blocks) == 50
+
+
+def test_undoing_reaches_back_through_frees_and_reuses():
+    st = _bare()
+    first = st.malloc(0x20)
+    st.heap.release(first)
+    snap = st.heap.snapshot()              # one block, freed
+    again = st.malloc(0x20)                # comes back off the free list
+    assert again == first and not st.heap.freed
+    st.heap.restore(snap)
+    assert first in st.heap.freed and not st.heap.blocks
+
+
+def test_restoring_a_heap_snapshot_puts_the_blocks_back():
+    st = _bare()
+    first = st.malloc(0x20)
+    snap = st.heap.snapshot()
+    second = st.malloc(0x20)
+    assert len(st.heap.blocks) == 2
+    st.heap.restore(snap)
+    assert set(st.heap.blocks) == {first}
+    assert st.heap.top == snap[0]
