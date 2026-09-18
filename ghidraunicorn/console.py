@@ -37,6 +37,9 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
   d, delete NUM          delete breakpoint NUM
   bl, breakpoints        list breakpoints
   en NUM / dis NUM       enable / disable breakpoint NUM
+  cond NUM [EXPR]        stop at NUM only when EXPR is true; no EXPR clears it
+                         registers are in scope: cond 1 rdi == 0 && u32(rsp) > 4
+  ignore NUM COUNT       pass NUM that many more times before stopping
   x/NFU ADDR             examine memory, e.g. x/8xw 0x2000, x/16xb sp, x/s 0x3000
   r, regs [NAME [VALUE]] show registers, one register, or set one
                          flags and fields too: r ZF 1, r cpsr.T 1, r cpsr.M 0x13
@@ -142,6 +145,8 @@ class UnicornConsole(code.InteractiveConsole):
             'd': self.cmd_delete, 'delete': self.cmd_delete,
             'bl': self.cmd_breaklist, 'breakpoints': self.cmd_breaklist,
             'en': self.cmd_enable, 'dis': self.cmd_disable,
+            'cond': self.cmd_condition, 'condition': self.cmd_condition,
+            'ignore': self.cmd_ignore,
             'r': self.cmd_regs, 'regs': self.cmd_regs,
             'm': self.cmd_set, 'set': self.cmd_set,
             'ctx': self.cmd_context, 'context': self.cmd_context,
@@ -177,6 +182,7 @@ class UnicornConsole(code.InteractiveConsole):
         return super().push(line, *args, **kwargs)
 
     def _run(self, fn: Callable[[List[str]], None], line: str) -> None:
+        self._line = line
         try:
             fn(shlex.split(line))
         except SystemExit:
@@ -189,6 +195,15 @@ class UnicornConsole(code.InteractiveConsole):
     def write(self, data: str) -> None:
         self.out.write(data)
         self.out.flush()
+
+    def _tail(self, word: int) -> str:
+        """The command line from word `word` on, exactly as it was typed.
+
+        A breakpoint condition is an expression, not a list of arguments, so
+        `cond 1 rax == 1` has to survive whatever shlex would do to it.
+        """
+        parts = getattr(self, '_line', '').split(None, word)
+        return parts[word].strip() if len(parts) > word else ''
 
     # ---- value parsing ---------------------------------------------------
 
@@ -367,13 +382,37 @@ class UnicornConsole(code.InteractiveConsole):
         self.target.enable_breakpoint(int(args[1], 0), False)
         self._publish_bps()
 
+    def cmd_condition(self, args: List[str]) -> None:
+        if len(args) < 2:
+            raise ValueError('usage: cond NUM [EXPRESSION]   (no expression clears it)')
+        num = int(args[1], 0)
+        # The expression is the rest of the line as typed, not shlex\'s idea
+        # of words: `cond 1 rax == 1` has to survive the quoting rules.
+        rest = self._tail(2)
+        bp = self.target.set_condition(num, rest)
+        if bp.condition:
+            self.write(f'breakpoint {num} stops only when {bp.condition}\n')
+        else:
+            self.write(f'breakpoint {num} has no condition\n')
+        self._publish_bps()
+
+    def cmd_ignore(self, args: List[str]) -> None:
+        if len(args) < 3:
+            raise ValueError('usage: ignore NUM COUNT')
+        bp = self.target.set_ignore_count(int(args[1], 0), int(args[2], 0))
+        self.write(f'breakpoint {bp.num} will be passed {bp.ignore_count} '
+                   f'more time(s) before stopping\n')
+        self._publish_bps()
+
     def cmd_breaklist(self, args: List[str]) -> None:
         if not self.target.breakpoints:
             self.write('no breakpoints\n')
             return
         for bp in self.target.breakpoints.values():
             state = 'enabled' if bp.enabled else 'disabled'
-            self.write(f'{bp.num:>3}  {bp.kind:<11} {bp.describe():<24} {state}  hits={bp.hit_count}\n')
+            self.write(f'{bp.num:>3}  {bp.kind:<11} {bp.describe():<40} {state}  hits={bp.hit_count}\n')
+            if bp.condition_error:
+                self.write(f'     condition failed: {bp.condition_error}\n')
 
     # ---- memory and registers -------------------------------------------
 

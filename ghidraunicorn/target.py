@@ -57,6 +57,15 @@ def _arrived_at(pc: int, target: Optional[int]) -> bool:
     return target is not None and 0 <= target - pc <= ARRIVAL_SLACK
 
 
+def _condition_note(bp: 'Breakpoint') -> str:
+    """A condition that would not evaluate is said out loud on every stop it
+    causes, rather than left for someone to notice the breakpoint is firing
+    more often than it should."""
+    if bp.condition_error:
+        return f' (condition {bp.condition!r} failed: {bp.condition_error})'
+    return ''
+
+
 class TargetError(Exception):
     pass
 
@@ -70,7 +79,17 @@ class Breakpoint:
     enabled: bool = True
     hit_count: int = 0
     temporary: bool = False
+    #: A Python expression that has to be true for this to stop. Registers
+    #: are in scope by name; see `UnicornTarget.condition_scope`.
+    condition: Optional[str] = None
+    #: Stop only after this many more qualifying hits. Each one consumes it.
+    ignore_count: int = 0
+    #: What went wrong the last time the condition was evaluated. A condition
+    #: that raises stops anyway, because a breakpoint that silently never
+    #: fires is far harder to notice than one that stops and says why.
+    condition_error: str = ''
     _hooks: List[int] = field(default_factory=list)
+    _code: object = None          # the compiled condition
 
     @property
     def end(self) -> int:
@@ -78,8 +97,14 @@ class Breakpoint:
 
     def describe(self) -> str:
         if self.kind == EXECUTE:
-            return f'*{self.address:#x}'
-        return f'{self.kind.lower()} {self.address:#x}+{self.size}'
+            where = f'*{self.address:#x}'
+        else:
+            where = f'{self.kind.lower()} {self.address:#x}+{self.size}'
+        if self.condition:
+            where += f' if {self.condition}'
+        if self.ignore_count:
+            where += f' (ignore {self.ignore_count})'
+        return where
 
 
 @dataclass(frozen=True)
@@ -296,6 +321,88 @@ class UnicornTarget:
         bp.enabled = enabled
         return bp
 
+    def set_condition(self, num: int, expression: Optional[str]) -> Breakpoint:
+        """Stop at this breakpoint only when `expression` is true.
+
+        It is compiled here rather than at the hook, both so that a typo is
+        reported when it is made and so that a breakpoint in a hot loop costs
+        an eval rather than a compile each time round.
+        """
+        bp = self.breakpoints[num]
+        expression = (expression or '').strip() or None
+        if expression is not None:
+            try:
+                bp._code = compile(expression, f'<breakpoint {num}>', 'eval')
+            except SyntaxError as e:
+                raise TargetError(f'bad condition for breakpoint {num}: {e}') from e
+        else:
+            bp._code = None
+        bp.condition = expression
+        bp.condition_error = ''
+        return bp
+
+    def set_ignore_count(self, num: int, count: int) -> Breakpoint:
+        """Pass this breakpoint `count` more times before stopping at it."""
+        bp = self.breakpoints[num]
+        bp.ignore_count = max(int(count), 0)
+        return bp
+
+    # ---- conditions ------------------------------------------------------
+
+    def condition_scope(self, bp: Breakpoint, extra: Optional[Dict] = None) -> Dict:
+        """The names a breakpoint condition can use.
+
+        Every register by its Ghidra name and in lower case, so that both
+        `RAX == 1` and `rax == 1` work; `pc`, `sp`, `icount` and `hits`;
+        `reg('cpsr.M')` for the names that are not identifiers; `mem`, and
+        `u8`/`u16`/`u32`/`u64` to read through a pointer. A watchpoint also
+        gets `address`, `size`, `value` and `access` for the access that
+        fired it.
+        """
+        scope: Dict[str, object] = {
+            'target': self, 'uc': self.uc, 'bp': bp,
+            'hits': bp.hit_count, 'icount': self.icount,
+            'pc': self.pc(), 'sp': self.sp(),
+            'reg': self.reg_read, 'mem': self.read,
+            'u8': lambda a: self._uint(a, 1), 'u16': lambda a: self._uint(a, 2),
+            'u32': lambda a: self._uint(a, 4), 'u64': lambda a: self._uint(a, 8),
+        }
+        for name, value in self.regs().items():
+            scope[name] = value
+            scope.setdefault(name.lower(), value)
+        if extra:
+            scope.update(extra)
+        return scope
+
+    def _uint(self, address: int, size: int) -> int:
+        return int.from_bytes(self.read(address, size), self.spec.endian)
+
+    def _passes(self, bp: Breakpoint, extra: Optional[Dict] = None) -> bool:
+        if bp._code is None:
+            return True
+        try:
+            result = bool(eval(bp._code, self.condition_scope(bp, extra)))
+            bp.condition_error = ''
+            return result
+        except Exception as e:                # any expression, any failure
+            bp.condition_error = f'{type(e).__name__}: {e}'
+            return True
+
+    def _triggers(self, bp: Breakpoint, extra: Optional[Dict] = None) -> bool:
+        """Whether this hit actually stops, and the bookkeeping for it.
+
+        gdb's order, which is what Ghidra's breakpoint model is built around:
+        a condition that is false is not a hit at all and does not count,
+        while an ignore count consumes a hit that did count.
+        """
+        if not self._passes(bp, extra):
+            return False
+        bp.hit_count += 1
+        if bp.ignore_count > 0:
+            bp.ignore_count -= 1
+            return False
+        return True
+
     def delete_breakpoint(self, num: int) -> None:
         bp = self.breakpoints.pop(num)
         if bp.kind == EXECUTE:
@@ -354,10 +461,10 @@ class UnicornTarget:
             uc.emu_stop()
             return
         bp = self._bp_by_addr.get(address)
-        if bp is not None and bp.enabled:
-            bp.hit_count += 1
+        if bp is not None and bp.enabled and self._triggers(bp):
             self._stop = StopEvent('breakpoint', address,
-                                   f'Breakpoint {bp.num} at {address:#x}', bp)
+                                   f'Breakpoint {bp.num} at {address:#x}'
+                                   + _condition_note(bp), bp)
             self._halting = True
             uc.emu_stop()
             return
@@ -391,12 +498,15 @@ class UnicornTarget:
         if not bp.enabled or self._stop is not None or self._pending is not None:
             return True
         what = 'write' if access == UC_MEM_WRITE else 'read'
-        bp.hit_count += 1
+        if not self._triggers(bp, {'address': address, 'size': size,
+                                   'value': value, 'access': what}):
+            return True
         # Do not stop here: Unicorn would leave PC on the accessing instruction
         # with its side effects already applied, and a resume would run it
         # again. Let the instruction finish and stop at the next code hook.
         self._pending = StopEvent(
-            'watchpoint', 0, f'Watchpoint {bp.num}: {what} {size} bytes at {address:#x}', bp)
+            'watchpoint', 0, f'Watchpoint {bp.num}: {what} {size} bytes at '
+                             f'{address:#x}' + _condition_note(bp), bp)
         return True
 
     # ---- execution -------------------------------------------------------

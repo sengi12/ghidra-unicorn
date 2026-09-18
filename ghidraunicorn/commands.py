@@ -410,6 +410,8 @@ def put_breakpoints() -> None:
         bobj.set_value('Expression', bp.describe())
         bobj.set_value('Kinds', bp.kind)
         bobj.set_value('Hit Count', bp.hit_count)
+        bobj.set_value('Ignore Count', bp.ignore_count)
+        bobj.set_value('Condition', bp.condition or '')
         bobj.set_value('Temporary', bp.temporary)
         bobj.set_value('_display', f'[{bp.num}] {bp.describe()}')
         lpath = BREAK_LOC_PATTERN.format(breaknum=bp.num, locnum=1)

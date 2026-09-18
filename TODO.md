@@ -7,9 +7,10 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
-  model already carries Condition and Ignore Count; populate them and
-  evaluate a Python predicate in the hook.
+- [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
+  hits, and it does not adjust hit counts as it passes them. (Moved up from
+  Known bugs: conditional breakpoints made the gap between what a forward
+  run and a backward run consider a hit larger and more visible.)
 
 ## Later
 
@@ -37,14 +38,13 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Known bugs
 
-- [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
-  hits, and it does not adjust hit counts as it passes them.
 - [ ] **Step-over backwards replays the whole retained history** to work out
   call depth, so it costs time proportional to what is kept rather than to
   the distance travelled.
 
 Fixed, kept here until the next release notes ship:
 
+- [x] Nothing outstanding from conditional breakpoints.
 - [x] A region mapped after a checkpoint survived a rewind to before it
   existed, because restoring mapped missing regions back but never unmapped
   extra ones.

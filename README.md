@@ -44,6 +44,12 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   Listing: execute, read, write and access. A breakpoint stops *before* its
   instruction; a watchpoint stops *after* the accessing instruction completes,
   with PC on the next one, so resuming never re-runs an instruction.
+- **Conditions and ignore counts** on any breakpoint or watchpoint. The
+  condition is a Python expression with the registers in scope -
+  `cond 3 rdi == 0 and u32(rsp + 8) > 0x1000` - and a watchpoint condition
+  also sees the `address`, `size`, `value` and `access` that fired it.
+  `ignore 3 100` passes it a hundred more times first. Both show in Ghidra's
+  Breakpoints window and can be set from there.
 - **State**: every stop is a new snapshot in the Time window. Registers,
   the memory map (with permissions), a module for the image so Ghidra maps
   the trace onto your static listing, and, by default, all mapped memory

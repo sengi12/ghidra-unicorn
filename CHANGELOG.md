@@ -9,6 +9,23 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Conditional breakpoints, hit and ignore counts.** A breakpoint or
+  watchpoint can carry a Python expression that has to be true before it
+  stops, and an ignore count that passes it a given number of times first.
+  Registers are in scope by name in either case, along with `pc`, `sp`,
+  `icount`, `hits`, `reg()` for the names that are not identifiers, `mem()`
+  and `u8`/`u16`/`u32`/`u64` to read through a pointer; a watchpoint also
+  sees the `address`, `size`, `value` and `access` that fired it. The order
+  is gdb's, which is what Ghidra's breakpoint model is built around: a
+  condition that is false is not a hit at all and does not count, while an
+  ignore count consumes a hit that did. A condition is compiled when it is
+  set, so a typo is reported there rather than at the hook, and one that
+  raises at evaluation stops and says why - a breakpoint that silently never
+  fires is much harder to notice than one that complains. `Condition` and
+  `Ignore Count` are published on the breakpoint spec under the names
+  Ghidra's own gdb connector uses, with methods to set them from the
+  Breakpoints window, and the console gains `cond` and `ignore`.
+
 - **System calls.** `syscalls.py` puts a small Linux under the emulator, so a
   program that traps into a kernel gets an answer instead of a fault: `read`,
   `write`, `writev`, `open`, `openat`, `close`, `lseek`, `mmap`, `mmap2`,

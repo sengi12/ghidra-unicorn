@@ -131,6 +131,13 @@ Each of these has a regression test; do not undo them.
 
 ## Ghidra behaviour that cost time to learn
 
+- **The breakpoint attributes Ghidra understands are `Condition` and
+  `Ignore Count`**, spelled exactly like that, alongside `Hit Count`,
+  `Commands`, `Pending`, `Silent` and `Temporary`. They are not guessable;
+  they came from Ghidra's own gdb connector, whose schema is at
+  `Ghidra/Debug/Debugger-agent-gdb/src/main/py/src/ghidragdb/schema.xml`
+  inside the installation. Check that file before inventing an attribute
+  name.
 - **Trace RMI refuses messages over 64 KiB**, so memory goes in 32 KiB chunks.
 - **Launcher parameters are keyed `env:OPT_NAME`**, not `OPT_NAME`, and
   `#@image-opt` must name the prefixed form too.
@@ -162,9 +169,10 @@ Each of these has a regression test; do not undo them.
 
 ## Where to start
 
-[TODO.md](TODO.md) is ordered. The next item is conditional breakpoints with
-hit and ignore counts, which Ghidra's breakpoint model already carries fields
-for. After that, the two remaining reverse-execution bugs, then thumb
+[TODO.md](TODO.md) is ordered. The next item is the two remaining
+reverse-execution bugs: reverse-continue only looks for execute breakpoints
+and does not move hit counts as it passes them, and reverse step-over replays
+the whole retained history to work out call depth. After those, thumb
 tracking, batch mode and the console extras.
 
 `examples/syscalls_and_stubs.py` is the shortest way to see the system call
