@@ -246,12 +246,15 @@ class Stubs:
             effect.detail = name
             try:
                 result = self.implementations[name](self, args)
-            except (StubError, UcError) as e:
-                # The program asked for something impossible - a free of a
-                # pointer it never got, a string with no terminator. Say so
-                # and return zero, which is what a failing libc call does.
+            except Exception as e:
+                # The program asked for something impossible: a free of a
+                # pointer it never got, a string with no terminator, a
+                # length out of a register nobody set. Say so and return
+                # zero, which is what a failing libc call does. Letting it
+                # out would propagate through emu_start and end the session,
+                # which is never the right answer to a bad argument.
                 if self.trace:
-                    self._log(f'[stub] {name} failed: {e}')
+                    self._log(f'[stub] {name} failed: {type(e).__name__}: {e}')
                 result = 0
             self._return(result)
         if self.trace:

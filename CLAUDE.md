@@ -41,6 +41,10 @@ GHIDRA_INSTALL_DIR=~/Applications/ghidra_12.1.3_PUBLIC \
 JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
 $PY tools/e2e_ghidra.py
 
+# A scripted run with no Ghidra at all. The exit status is what CI reads.
+$PY -m ghidraunicorn --harness examples/syscalls_and_stubs.py --batch \
+    --commands 'c; sys; assert target.terminated'
+
 # Triage the sample's real crashes (four files, three distinct bugs)
 $PY -m ghidraunicorn.triage --harness examples/afl_unicorn_simple.py \
     --inputs "$AFL_UNICORN_DIR/unicorn_mode/samples/simple/output/default/crashes" \
@@ -185,8 +189,8 @@ Each of these has a regression test; do not undo them.
 ## Where to start
 
 [TODO.md](TODO.md) is ordered and there are no known bugs left. The next
-item is batch and headless mode, then the console extras, session recording
-and region-aware preloading. The two items needing a
+item is the console extras, then session recording and region-aware
+preloading. The two items needing a
 running Ghidra - the context panel and differential execution against the
 p-code emulator - are last.
 

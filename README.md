@@ -312,6 +312,28 @@ launches the connector; the difference is only which terminal you type in.
 Pair it with [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov) to
 paint the fuzzer's coverage over the same listing you are stepping through.
 
+## Scripted and headless runs
+
+`--commands` runs console commands as soon as the target is loaded, and
+`--batch` then exits instead of prompting. With `--batch` there is no Ghidra
+in the picture at all:
+
+```
+python -m ghidraunicorn --harness examples/syscalls_and_stubs.py --batch \
+    --commands 'b 0x400020; c; r rax; assert target.reg_read("RAX") == 16'
+```
+
+It is the same console the prompt uses, so anything you can type you can
+script. Anything that is not a command is Python, which means `assert` is
+the assertion language and needs nothing new: the exit status is non-zero if
+any command failed, whether that was a bad command, an exception, a syntax
+error, or a script that ended part way through an unclosed bracket. That is
+enough to put a harness in CI and have it fail the build when the crash
+stops reproducing.
+
+`--commands-file` reads the same thing from a file. Commands split on
+newlines and semicolons, quotes are respected, and `#` starts a comment.
+
 ## Triaging a fuzzing run
 
 Stepping one crash is useful; a fuzzer hands you a directory of them. Replay

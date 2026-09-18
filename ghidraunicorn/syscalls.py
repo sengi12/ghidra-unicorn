@@ -63,6 +63,12 @@ MAP_ANONYMOUS = 0x20
 
 SEEK_SET, SEEK_CUR, SEEK_END = 0, 1, 2
 
+#: No single call moves more than this. A count larger than any plausible
+#: mapping is a wild argument - an uninitialised register, or a length that
+#: came back from a function nobody stubbed - and a kernel answers those with
+#: EFAULT rather than trying to allocate for them.
+MAX_TRANSFER = 1 << 30
+
 
 class SyscallError(Exception):
     """A call that failed, carrying the name of the error to report."""
@@ -220,6 +226,16 @@ class Syscalls:
                 rec.result = self.errno('EFAULT')
                 if self.trace:
                     self._log(f'  ({e})')
+            except Exception as e:
+                # Anything else means the arguments made no sense - a length
+                # from a register nobody set, a pointer from a function
+                # nobody stubbed. A kernel answers that; it does not bring
+                # the machine down, and neither may we: an exception raised
+                # here would propagate out of emu_start and end the session.
+                rec.failed, rec.result_name = True, 'EINVAL'
+                rec.result = self.errno('EINVAL')
+                if self.trace:
+                    self._log(f'  ({type(e).__name__}: {e})')
             self._apply_result(rec)
         if self.trace:
             self._log(f'[syscall] {rec.describe()}')
@@ -293,6 +309,8 @@ class Syscalls:
         return [e.detail for e in self.log.entries if e.detail is not None]
 
     def read_mem(self, address: int, size: int) -> bytes:
+        if size < 0 or size > MAX_TRANSFER:
+            raise SyscallError('EFAULT')
         return self.target.read(address, size)
 
     def write_mem(self, address: int, data: bytes) -> None:

@@ -56,6 +56,9 @@ START = CODE
 MODULES = [('example', CODE, SIZE)]
 #: What the program reads when nothing is given with --stdin.
 STDIN = b'a line of input\n'
+#: This file is a raw programme with no symbol table, so it says where its
+#: stubs belong rather than leaving it to --symbols.
+STUBS_AT = {'malloc': MALLOC, 'strlen': STRLEN}
 
 
 def _call(here: int, target: int) -> bytes:
@@ -96,12 +99,5 @@ def create(input_file=None):
 
 
 def stubs_at():
-    """Where the stub layer should bind, for a run with no symbol table.
-
-    Normally `--symbols` places these from the binary's own symbols. This
-    file has no symbol table, so the console does it by hand::
-
-        stub malloc 0x400800
-        stub strlen 0x400810
-    """
-    return {'malloc': MALLOC, 'strlen': STRLEN}
+    """Where the stub layer binds. `STUBS_AT` above is what does it."""
+    return dict(STUBS_AT)

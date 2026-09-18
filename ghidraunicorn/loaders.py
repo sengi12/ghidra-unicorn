@@ -272,6 +272,13 @@ def install_layers(loaded: Loaded, harness=None, *, syscalls: bool = True,
             target, stdin=stdin, files=files, on_output=on_output, trace=trace)
     if stubs and stubs_mod.available(target.spec.key):
         layer = stubs_mod.install(target, symbols, on_output=on_output, trace=trace)
+        # A raw binary has no symbol table, so a harness may name the
+        # addresses itself: STUBS_AT = {'malloc': 0x400800}.
+        for name, address in (getattr(harness, 'STUBS_AT', None) or {}).items():
+            try:
+                layer.bind(name, _parse_addr(address))
+            except KeyError:
+                pass
         # With no symbols nothing is bound, and an empty stub layer is just
         # overhead; keep it anyway so a person can bind by hand from the
         # console, which is the whole point of having it there.

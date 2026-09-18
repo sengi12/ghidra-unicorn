@@ -64,12 +64,53 @@ In Ghidra's terminal, copy and paste are Cmd+Shift+C / Cmd+Shift+V on macOS
 
 _UNITS = {'b': 1, 'h': 2, 'w': 4, 'g': 8}
 
+
 HISTORY_FILE = os.path.expanduser(
     os.getenv('GHIDRA_UNICORN_HISTORY') or '~/.ghidra_unicorn_history')
 
 # Characters that end a word for completion. Unlike readline's default this
 # keeps '/', '-' and '.' inside a word, so `x/8xw` and `cpsr.M` complete whole.
 COMPLETER_DELIMS = ' \t\n`!@#$%^&*()=+[{]}\\|;:\'",<>?'
+
+
+def split_commands(text: str) -> List[str]:
+    """Split a script into commands, on newlines and on semicolons.
+
+    Quotes are respected, so a semicolon inside one stays where it was put,
+    and `#` starts a comment unless it is quoted. A breakpoint condition is
+    an expression and may well contain either, which is why this is not a
+    `text.split(";")`.
+    """
+    out: List[str] = []
+    for line in text.splitlines():
+        for part in _split_line(line):
+            part = part.strip()
+            if part:
+                out.append(part)
+    return out
+
+
+def _split_line(line: str) -> List[str]:
+    parts: List[str] = []
+    current: List[str] = []
+    quote = ''
+    for char in line:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ''
+        elif char in '\'"':
+            quote = char
+            current.append(char)
+        elif char == '#':
+            break                      # a comment runs to the end of the line
+        elif char == ';':
+            parts.append(''.join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append(''.join(current))
+    return parts
 
 
 class _Completer:
@@ -162,6 +203,9 @@ class UnicornConsole(code.InteractiveConsole):
         }
         self.quit = False
         self._readline = None
+        #: How many commands have failed; `run_script` reports it, and a
+        #: batch run exits non-zero when it is not zero.
+        self.errors = 0
 
     # ---- dispatch --------------------------------------------------------
 
@@ -188,8 +232,10 @@ class UnicornConsole(code.InteractiveConsole):
         except SystemExit:
             raise
         except (TargetError, UcError, ValueError, KeyError, IndexError) as e:
+            self.errors += 1
             self.write(f'error: {e}\n')
         except Exception as e:  # pragma: no cover
+            self.errors += 1
             self.write(f'error: {e!r}\n')
 
     def write(self, data: str) -> None:
@@ -614,6 +660,59 @@ class UnicornConsole(code.InteractiveConsole):
             self._readline.write_history_file(HISTORY_FILE)
         except OSError:
             pass
+
+    # ---- running a script ------------------------------------------------
+
+    def run_script(self, text: str, echo: bool = True) -> int:
+        """Run a batch of commands and return how many of them failed.
+
+        This is what `--commands` drives, and it is the same code path the
+        prompt uses, so anything that can be typed can be scripted. Since
+        anything that is not a command is Python, `assert target.pc() ==
+        0x1234` is a perfectly good way to make a scripted run fail, which
+        is what makes this usable from CI.
+        """
+        self.errors = 0
+        self.target.listeners.append(self._on_stop_quietly)
+        try:
+            for line in split_commands(text):
+                if echo:
+                    self.write(f'{getattr(sys, "ps1", ">>> ")}{line}\n')
+                try:
+                    self.push(line)
+                except SystemExit:
+                    break                     # `q` ends the script, not the run
+            if self.buffer:
+                # The interpreter is still waiting for the rest of something
+                # - an unclosed bracket, an `if` with no body. At a prompt
+                # that is fine and a person types more; in a script it means
+                # the remaining commands were swallowed into the buffer and
+                # never ran, which must not pass for success.
+                self.write('error: the script ended part way through '
+                           f'{"".join(self.buffer)!r}\n')
+                self.errors += 1
+                self.resetbuffer()
+        finally:
+            if self._on_stop_quietly in self.target.listeners:
+                self.target.listeners.remove(self._on_stop_quietly)
+        return self.errors
+
+    def _on_stop_quietly(self, ev) -> None:
+        """A stop during a script: report it without redrawing a prompt."""
+        self.ctx.show(ev)
+
+    def showtraceback(self) -> None:          # type: ignore[override]
+        """Count Python errors as well as command errors.
+
+        A script is only useful in CI if a failure can be told from a pass,
+        and a bare `assert` is the natural way to write one here.
+        """
+        self.errors += 1
+        super().showtraceback()
+
+    def showsyntaxerror(self, *args, **kwargs) -> None:   # type: ignore[override]
+        self.errors += 1
+        super().showsyntaxerror(*args, **kwargs)
 
     def run(self, banner: Optional[str] = None) -> None:
         if banner is None:

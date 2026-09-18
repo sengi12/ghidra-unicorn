@@ -78,6 +78,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help='copy all mapped memory into the trace at launch (OPT_PRELOAD)')
     p.add_argument('--preload-cap', type=int, default=32 * 1024 * 1024,
                    help='byte cap for --preload')
+    p.add_argument('--commands', default=_env('OPT_COMMANDS'),
+                   help='console commands to run once the target is loaded, '
+                        'separated by ";" or newlines, e.g. '
+                        '"b 0x100040; c; x/8xw 0x300000" (OPT_COMMANDS)')
+    p.add_argument('--commands-file', default=_env('OPT_COMMANDS_FILE'),
+                   help='file of console commands, one per line '
+                        '(OPT_COMMANDS_FILE)')
+    p.add_argument('--batch', action='store_true',
+                   default=_bool(_env('OPT_BATCH'), False),
+                   help='run the commands and exit, with no prompt and no '
+                        'Ghidra needed; the exit status is the number of '
+                        'commands that failed (OPT_BATCH)')
     p.add_argument('--no-repl', action='store_true',
                    help='do not open the interactive prompt; wait for Ghidra to disconnect')
     return p
@@ -134,6 +146,20 @@ class _Tee:
         return self.streams[0].fileno()
 
 
+def script_text(args) -> str:
+    """The commands to run, from --commands and --commands-file together."""
+    parts = []
+    if args.commands_file:
+        try:
+            with open(args.commands_file) as f:
+                parts.append(f.read())
+        except OSError as e:
+            raise SystemExit(f'could not read {args.commands_file}: {e}')
+    if args.commands:
+        parts.append(args.commands)
+    return '\n'.join(parts)
+
+
 def main(argv=None) -> int:
     logfile = os.getenv('GHIDRA_UNICORN_LOG')
     if logfile:
@@ -141,9 +167,15 @@ def main(argv=None) -> int:
         sys.stdout = _Tee(sys.stdout, f)
         sys.stderr = _Tee(sys.stderr, f)
     args = build_parser().parse_args(argv)
-    if not args.address and args.listen is None:
+    script = script_text(args)
+    attached = bool(args.address) or args.listen is not None
+    # A batch run needs no Ghidra at all: the console, the emulator and
+    # everything the commands can reach work perfectly well without a trace,
+    # which is what makes this usable from CI.
+    if not attached and not (args.batch or script):
         raise SystemExit('No Ghidra address: set GHIDRA_TRACE_RMI_ADDR, pass --address, '
-                         'or pass --listen to wait for Ghidra to connect')
+                         'pass --listen to wait for Ghidra to connect, or pass '
+                         '--batch with --commands to run without Ghidra')
 
     loaded = load(args)
     commands.STATE.loaded = loaded
@@ -156,25 +188,38 @@ def main(argv=None) -> int:
     symbols = _symbols(args)
     _install_layers(args, loaded, symbols)
 
-    if args.listen is not None:
-        commands.listen(args.listen)
-    else:
-        commands.connect(args.address)
-    commands.start_trace()
-    hooks.install(target)
-    with commands.batched_tx('Launch'):
-        commands.snapshot('Launched')
-        commands.put_all(preload=_bool(args.preload, True), preload_cap=args.preload_cap)
-    commands.activate()
-    print('Trace started. Ghidra is now driving the emulator.', flush=True)
+    if attached:
+        if args.listen is not None:
+            commands.listen(args.listen)
+        else:
+            commands.connect(args.address)
+        commands.start_trace()
+        hooks.install(target)
+        with commands.batched_tx('Launch'):
+            commands.snapshot('Launched')
+            commands.put_all(preload=_bool(args.preload, True),
+                             preload_cap=args.preload_cap)
+        commands.activate()
+        print('Trace started. Ghidra is now driving the emulator.', flush=True)
 
-    if args.no_repl or not sys.stdin.isatty():
-        _wait_for_disconnect()
+    from .console import UnicornConsole
+    console = UnicornConsole(target, loaded, symbols=symbols)
+    failed = 0
+    if script:
+        failed = console.run_script(script)
+        if failed:
+            print(f'{failed} command(s) failed', flush=True)
+
+    if args.batch:
+        pass                      # the commands were the whole run
+    elif args.no_repl or not sys.stdin.isatty():
+        if attached:
+            _wait_for_disconnect()
     else:
-        from .console import UnicornConsole
-        UnicornConsole(target, loaded, symbols=symbols).run()
-    commands.disconnect()
-    return 0
+        console.run()
+    if attached:
+        commands.disconnect()
+    return 1 if failed else 0
 
 
 def _program_output(stream: int, data: bytes) -> None:

@@ -9,6 +9,30 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
+  runs console commands as soon as the target is loaded, from the command
+  line or from a file with `--commands-file`, and `--batch` then exits
+  instead of prompting. With `--batch` no Ghidra is needed at all: the
+  emulator, the console and everything the commands can reach work without a
+  trace, so a run can be scripted from CI. It is the same console the prompt
+  uses, so anything that can be typed can be scripted - and since anything
+  that is not a command is Python, `assert target.pc() == 0x1234` is how a
+  scripted run is made to fail. The exit status is non-zero when any command
+  failed, counting failed commands, Python exceptions, syntax errors, and a
+  script that ended part way through something (an unclosed bracket, which
+  at a prompt means "type more" and in a script means the rest was
+  swallowed). Commands split on newlines and semicolons, with quotes
+  respected and `#` starting a comment, so a breakpoint condition survives
+  being written in one.
+
+  Two things that only showed up once whole runs could be scripted are fixed
+  with it: a system call handler or a stub given a wild argument - a length
+  out of a register nobody set, a pointer from a function nobody stubbed -
+  raised out of `emu_start` and ended the session, where a kernel would
+  simply answer EINVAL; and a harness can now name its own stub addresses
+  with `STUBS_AT`, so a raw binary with no symbol table gets its stubs bound
+  without anyone typing `stub malloc 0x400800` first.
+
 - **Thumb tracking.** ARM code changes instruction set as it runs, and
   everything that used to be settled by the language the target was launched
   with now follows the processor instead: the T flag in the status register
