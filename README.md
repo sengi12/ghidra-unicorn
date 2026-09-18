@@ -34,8 +34,10 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   the trace onto your static listing, and, by default, all mapped memory
   copied into the trace at launch (capped at 32 MiB) so the Listing is
   populated immediately. Everything else is read on demand.
-- **Architectures**: x86-64, x86, AArch64 (LE/BE), ARM (LE/BE, ARM and
-  Thumb), MIPS32 and MIPS64 (LE/BE). Adding one is a table in `arch.py`.
+- **Architectures**: x86-64, x86, AArch64, ARM and Thumb, MIPS32 and MIPS64,
+  RISC-V 32 and 64, PowerPC 32 and 64, m68k, SPARC 32 and 64, and TriCore,
+  in both endiannesses wherever Unicorn supports the pair. Twenty in all, and
+  adding one is a table entry in `arch.py`.
 - **Flags as registers**: cpsr, nzcv and eflags are decomposed into the
   one-byte flag registers Ghidra defines (NG/ZR/CY/OV, CF/ZF/SF/OF, ...), so
   each shows as its own editable row in the Registers window and editing one
@@ -67,7 +69,10 @@ Tested with Ghidra 12.1.3 (JDK 21) and Unicorn 2.1.
 
 3. In Ghidra's Debugger tool: **Edit → Tool Options → Debugger → Paths to
    search for user-created debugger launchers**, add the
-   `debugger-launchers` directory of this checkout.
+   `debugger-launchers` directory of this checkout. The same directory works
+   on Windows, where Ghidra picks up the `.ps1` and `.bat` launchers instead
+   of the `.sh`. Those two are written to Ghidra's own conventions but have
+   not been run on Windows.
 
 That is all. Open a program, switch to the Debugger tool, and **unicorn**
 appears in the Launch dropdown (the menu next to the debug button).
@@ -383,7 +388,10 @@ ghidraunicorn/
   symbols.py    names for addresses, exported from a Ghidra program
   coverage.py   basic-block recording, written as drcov
   provenance.py which input bytes were read, and by which instruction
-debugger-launchers/local-unicorn.sh   the launcher Ghidra shows in its menu
+debugger-launchers/    the launchers Ghidra shows in its menu:
+  local-unicorn.sh       macOS and Linux
+  local-unicorn.ps1      Windows, PowerShell
+  local-unicorn.bat      Windows, cmd, via local-unicorn-win.py
 examples/      harnesses
 tests/         pytest, no Ghidra needed (106 tests, incl. a real-pty test)
 tools/e2e_ghidra.py     drives a real Ghidra through the whole flow

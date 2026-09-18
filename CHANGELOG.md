@@ -51,6 +51,21 @@ Notable changes to ghidra-unicorn. The format follows
   offsets that run consumed. On the sample's crashes that is `0, 9-10` for
   one bug and `20` for another, out of inputs of 11 and 32 bytes.
 
+- **Eight more processors**: RISC-V 32 and 64, PowerPC 32 and 64, m68k,
+  SPARC 32 and 64, and TriCore, bringing the total to twenty. Every language
+  id, compiler spec and register name was checked against the processor
+  definitions in the installed Ghidra rather than written from memory, and
+  each one is covered by the tests that read every register from a live
+  engine and decode a call for step-over. Where Ghidra models a status
+  register's bits as its own registers, those are exposed as flags: PowerPC's
+  carry and overflow bits off `XER`, and m68k's condition codes off `SR`.
+  TriCore's `PSW` is exposed as fields, since Ghidra leaves its bit
+  definitions commented out.
+- **Windows launchers**, `local-unicorn.ps1` and `local-unicorn.bat`, with
+  the same options as the Unix one, following Ghidra's own launcher
+  conventions for each file type. They are unverified on Windows: there was
+  no Windows machine to run them on.
+
 ### Changed
 
 - **`tools/setup_project.py` seeds the entry point.** A raw binary has no
