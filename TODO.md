@@ -7,11 +7,7 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Lazy memory for large dumps.** Preloading is capped at 32 MiB today
-  and the rest is read on demand; make the cap region-aware so the regions
-  that matter are resident and huge dumps stay usable.
-
-## Later
+These two need a running Ghidra to build against, so they are last.
 
 - [ ] **A context panel inside Ghidra.** A docking `ComponentProvider` in a
   Ghidra script, in the style of ghidra-hexEditor and ghidra-aflcov, showing

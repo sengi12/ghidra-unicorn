@@ -188,8 +188,7 @@ Each of these has a regression test; do not undo them.
 
 ## Where to start
 
-[TODO.md](TODO.md) is ordered and there are no known bugs left. The next
-item is region-aware preloading. The two items
+[TODO.md](TODO.md) is ordered and there are no known bugs left. The two items
 needing a running Ghidra - the context panel and differential execution
 against the p-code emulator - are last. The two items needing a
 running Ghidra - the context panel and differential execution against the

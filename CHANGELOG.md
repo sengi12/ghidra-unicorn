@@ -9,6 +9,20 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Preloading is region-aware.** The cap was applied to the regions in
+  address order, and the first region that did not fit stopped the loop
+  outright, so a dump with a large heap low in the address space filled the
+  budget before reaching the code and the stack and the Dynamic Listing came
+  up empty - the two regions anybody wants to see first were the ones most
+  likely to be missed. Regions are now ranked by what they are: the one
+  holding the program counter, then the stack pointer, then the input region
+  a harness declared, then a declared module, then anything executable, with
+  size as the tie-break so the budget buys as many as it can. A region too
+  large for what is left is no longer skipped either - a window of it is
+  copied around whatever made it interesting, because part of a huge region
+  is far more use than none of it and the rest is read on demand anyway. The
+  launch line now says what was preloaded and what was left.
+
 - **Session recording.** `--record PATH`, or `record PATH` in the console,
   logs the session to a file that is both a transcript and a script. The
   trick is that `#` already starts a comment, so the commands go in as

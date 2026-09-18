@@ -56,7 +56,11 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   the memory map (with permissions), a module for the image so Ghidra maps
   the trace onto your static listing, and, by default, all mapped memory
   copied into the trace at launch (capped at 32 MiB) so the Listing is
-  populated immediately. Everything else is read on demand.
+  populated immediately. The cap is spent on the regions that matter first -
+  the code you are stopped in, the stack, the input - and a region too big
+  for what is left gets a window around the interesting part rather than
+  being skipped, so a multi-gigabyte dump still comes up usable. Everything
+  else is read on demand.
 - **Thumb tracking**: ARM code that switches instruction set with `blx` or
   `bx` is followed as it runs, so each stop tells Ghidra which set it is in
   and mixed code disassembles correctly instead of being pinned to the

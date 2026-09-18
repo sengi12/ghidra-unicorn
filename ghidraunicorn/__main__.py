@@ -77,7 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--preload', default=_env('OPT_PRELOAD', 'true'),
                    help='copy all mapped memory into the trace at launch (OPT_PRELOAD)')
     p.add_argument('--preload-cap', type=int, default=32 * 1024 * 1024,
-                   help='byte cap for --preload')
+                   help='byte cap for --preload. The regions that matter go '
+                        'first, so a huge dump still arrives with its code '
+                        'and stack resident and the rest read on demand')
     p.add_argument('--commands', default=_env('OPT_COMMANDS'),
                    help='console commands to run once the target is loaded, '
                         'separated by ";" or newlines, e.g. '
@@ -202,8 +204,10 @@ def main(argv=None) -> int:
         hooks.install(target)
         with commands.batched_tx('Launch'):
             commands.snapshot('Launched')
-            commands.put_all(preload=_bool(args.preload, True),
-                             preload_cap=args.preload_cap)
+            preloaded = commands.put_all(preload=_bool(args.preload, True),
+                                         preload_cap=args.preload_cap)
+        if preloaded is not None:
+            print(preloaded.describe(), flush=True)
         commands.activate()
         print('Trace started. Ghidra is now driving the emulator.', flush=True)
 
