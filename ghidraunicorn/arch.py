@@ -8,13 +8,21 @@ is the width Ghidra expects when the value is pushed into the trace.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from unicorn import (UC_ARCH_ARM, UC_ARCH_ARM64, UC_ARCH_MIPS, UC_ARCH_X86,
-                     UC_MODE_32, UC_MODE_64, UC_MODE_ARM, UC_MODE_BIG_ENDIAN,
-                     UC_MODE_LITTLE_ENDIAN, UC_MODE_MIPS32, UC_MODE_MIPS64,
-                     UC_MODE_THUMB)
+from unicorn import (UC_ARCH_ARM, UC_ARCH_ARM64, UC_ARCH_M68K, UC_ARCH_MIPS,
+                     UC_ARCH_PPC, UC_ARCH_RISCV, UC_ARCH_SPARC, UC_ARCH_TRICORE,
+                     UC_ARCH_X86, UC_MODE_32, UC_MODE_64, UC_MODE_ARM,
+                     UC_MODE_BIG_ENDIAN, UC_MODE_LITTLE_ENDIAN, UC_MODE_MIPS32,
+                     UC_MODE_MIPS64, UC_MODE_PPC32, UC_MODE_PPC64,
+                     UC_MODE_RISCV32, UC_MODE_RISCV64, UC_MODE_SPARC32,
+                     UC_MODE_SPARC64, UC_MODE_THUMB)
 from unicorn import arm64_const as a64
 from unicorn import arm_const as arm
+from unicorn import m68k_const as m68k
 from unicorn import mips_const as mips
+from unicorn import ppc_const as ppc
+from unicorn import riscv_const as riscv
+from unicorn import sparc_const as sparc
+from unicorn import tricore_const as tricore
 from unicorn import x86_const as x86
 
 
@@ -243,6 +251,148 @@ def _mips(big: bool, bits: int) -> ArchSpec:
                     call_mnemonics=('jal', 'jalr', 'bal', 'jalx'))
 
 
+# ---- RISC-V --------------------------------------------------------------
+# Ghidra names the integer registers by their ABI names (riscv.reg.sinc:46);
+# x0..x31 appear there only as comments. RISC-V has no condition-code
+# register: Ghidra defines no one-byte flag registers for it (fcsr is
+# commented out of riscv.reg.sinc), so `flags`, `status` and `fields` are all
+# empty here. Unicorn 2.1.4 only builds little-endian RISC-V.
+_RISCV_GP = ['zero', 'ra', 'sp', 'gp', 'tp', 't0', 't1', 't2',
+             's0', 's1', 'a0', 'a1', 'a2', 'a3', 'a4', 'a5',
+             'a6', 'a7', 's2', 's3', 's4', 's5', 's6', 's7',
+             's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6']
+
+
+def _riscv(bits: int) -> ArchSpec:
+    size = bits // 8
+    regs = _regs(_RISCV_GP, riscv, size, 'UC_RISCV_REG_')
+    regs.append(Reg('pc', riscv.UC_RISCV_REG_PC, size))
+    mode = UC_MODE_RISCV64 if bits == 64 else UC_MODE_RISCV32
+    cs_mode = ('CS_MODE_RISCV64' if bits == 64 else 'CS_MODE_RISCV32', 'CS_MODE_RISCVC')
+    # RISCVC so Capstone reports the 2-byte size of compressed instructions;
+    # step-over needs the size to place its temporary breakpoint.
+    return ArchSpec(f'riscv{bits}', UC_ARCH_RISCV, mode,
+                    f'RISCV:LE:{bits}:default', 'gcc', 'little', bits,
+                    tuple(regs), 'pc', 'sp', cs=_cs('CS_ARCH_RISCV', *cs_mode),
+                    call_mnemonics=('jal', 'jalr', 'c.jal', 'c.jalr'))
+
+
+# ---- PowerPC -------------------------------------------------------------
+# Unicorn 2.1.4 only builds big-endian PowerPC; UC_MODE_LITTLE_ENDIAN is
+# rejected with UC_ERR_MODE, so the PowerPC:LE:* languages get no entry.
+# Ghidra's one-byte XER flag registers are ppc_common.sinc:41. xer_count (the
+# 7-bit string-transfer byte count) is one of them but is not a single bit, so
+# it is a Field only; likewise cr0..cr7 are 4-bit condition fields, which
+# Unicorn exposes as their own registers, so they are listed as registers.
+# OV32/CA32 are ISA 3.0 (64-bit) additions; the bits are reserved and read as
+# zero on 32-bit, but Ghidra defines the flag registers for both languages.
+_PPC_FLAG_BITS = {'xer_so': 31, 'xer_ov': 30, 'xer_ov32': 19,
+                  'xer_ca': 29, 'xer_ca32': 18}
+_PPC_FIELDS = (Field('SO', 31), Field('OV', 30), Field('CA', 29),
+               Field('OV32', 19), Field('CA32', 18), Field('BC', 0, 7))
+
+
+def _ppc(bits: int) -> ArchSpec:
+    size = bits // 8
+    regs = [Reg(f'r{i}', getattr(ppc, f'UC_PPC_REG_{i}'), size) for i in range(32)]
+    regs += [Reg('pc', ppc.UC_PPC_REG_PC, size),
+             Reg('LR', ppc.UC_PPC_REG_LR, size),
+             Reg('CTR', ppc.UC_PPC_REG_CTR, size),
+             Reg('XER', ppc.UC_PPC_REG_XER, size),
+             Reg('MSR', ppc.UC_PPC_REG_MSR, size)]
+    regs += _regs([f'cr{i}' for i in range(8)], ppc, 1, 'UC_PPC_REG_')
+    mode = (UC_MODE_PPC64 if bits == 64 else UC_MODE_PPC32) | UC_MODE_BIG_ENDIAN
+    cs_mode = ('CS_MODE_64' if bits == 64 else 'CS_MODE_32', 'CS_MODE_BIG_ENDIAN')
+    return ArchSpec(f'ppc{bits}', UC_ARCH_PPC, mode,
+                    f'PowerPC:BE:{bits}:default', 'default', 'big', bits,
+                    tuple(regs), 'pc', 'r1', cs=_cs('CS_ARCH_PPC', *cs_mode),
+                    call_mnemonics=('bl', 'bla', 'bctrl', 'blrl'),
+                    flags=_flags(_PPC_FLAG_BITS, 'XER'), status='XER',
+                    fields=_PPC_FIELDS)
+
+
+# ---- m68k ----------------------------------------------------------------
+# Ghidra calls A7 "SP" (68000.sinc:12) and defines the SR flag registers at
+# 68000.sinc:15; the packflags macro (68000.sinc:812) pins their bit
+# positions: SR = (TF<<15)|(SVF<<13)|(IPL<<8)|(XF<<4)|(NF<<3)|(ZF<<2)|(VF<<1)|CF.
+# IPL is one of those flag registers but holds 3 bits, so it is a Field only.
+# Unicorn 2.1.4 only builds big-endian m68k.
+_M68K_FLAG_BITS = {'TF': 15, 'SVF': 13, 'XF': 4, 'NF': 3, 'ZF': 2, 'VF': 1, 'CF': 0}
+_M68K_FIELDS = (Field('T', 14, 2), Field('S', 13), Field('M', 12), Field('IPL', 8, 3),
+                Field('X', 4), Field('N', 3), Field('Z', 2), Field('V', 1), Field('C', 0))
+
+
+def _m68k() -> ArchSpec:
+    regs = _regs([f'D{i}' for i in range(8)], m68k, 4, 'UC_M68K_REG_')
+    regs += _regs([f'A{i}' for i in range(7)], m68k, 4, 'UC_M68K_REG_')
+    regs += [Reg('SP', m68k.UC_M68K_REG_A7, 4),
+             Reg('PC', m68k.UC_M68K_REG_PC, 4),
+             Reg('SR', m68k.UC_M68K_REG_SR, 2)]
+    return ArchSpec('m68k', UC_ARCH_M68K, UC_MODE_BIG_ENDIAN,
+                    '68000:BE:32:default', 'default', 'big', 32,
+                    tuple(regs), 'PC', 'SP',
+                    cs=_cs('CS_ARCH_M68K', 'CS_MODE_BIG_ENDIAN', 'CS_MODE_M68K_040'),
+                    call_mnemonics=('jsr', 'bsr', 'bsr.b', 'bsr.w', 'bsr.l'),
+                    flags=_flags(_M68K_FLAG_BITS, 'SR'), status='SR',
+                    fields=_M68K_FIELDS)
+
+
+# ---- SPARC ---------------------------------------------------------------
+# Ghidra names o6 "sp" and i6 "fp" (SparcV9.sinc:10) and Unicorn's SP/FP
+# constants are the same ids as O6/I6, so the SLEIGH names map straight
+# across. Ghidra also defines the one-byte flag registers i_nf/i_zf/i_vf/i_cf
+# (and x_* for the 64-bit condition codes) as bits of CCR, but Unicorn 2.1.4
+# exposes no readable condition-code register: reading UC_SPARC_REG_Y is a
+# documented no-op, UC_SPARC_REG_ICC/XCC return UC_ERR_ARG on sparc64, and
+# UC_SPARC_REG_PSR segfaults the emulator on sparc32. So no flags, no status
+# register and no fields here, and Y/nPC are left out of the register table.
+# Unicorn 2.1.4 only builds big-endian SPARC.
+_SPARC_GP = (['g0', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7',
+              'o0', 'o1', 'o2', 'o3', 'o4', 'o5', 'sp', 'o7',
+              'l0', 'l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7',
+              'i0', 'i1', 'i2', 'i3', 'i4', 'i5', 'fp', 'i7'])
+
+
+def _sparc(bits: int) -> ArchSpec:
+    size = bits // 8
+    regs = _regs(_SPARC_GP, sparc, size, 'UC_SPARC_REG_')
+    regs.append(Reg('PC', sparc.UC_SPARC_REG_PC, size))
+    mode = (UC_MODE_SPARC64 if bits == 64 else UC_MODE_SPARC32) | UC_MODE_BIG_ENDIAN
+    cs_mode = ('CS_MODE_BIG_ENDIAN', 'CS_MODE_V9') if bits == 64 else ('CS_MODE_BIG_ENDIAN',)
+    return ArchSpec(f'sparc{bits}', UC_ARCH_SPARC, mode,
+                    f'sparc:BE:{bits}:default', 'default', 'big', bits,
+                    tuple(regs), 'PC', 'sp', cs=_cs('CS_ARCH_SPARC', *cs_mode),
+                    call_mnemonics=('call', 'jmpl'))
+
+
+# ---- TriCore -------------------------------------------------------------
+# Ghidra defines no one-byte flag registers for TriCore: the PSW bit
+# definitions in tricore.sinc are commented out and used only as @define
+# bitranges, so `flags` is empty and the whole PSW layout is Fields.
+# tricore.cspec names a10 the stack pointer. Unicorn's only valid TriCore
+# mode is 0 (little-endian).
+_TRICORE_RM = {0: 'RN', 1: 'RZ', 2: 'RP', 3: 'RM'}
+_TRICORE_IO = {0: 'User-0', 1: 'User-1', 2: 'Supervisor', 3: 'reserved'}
+_TRICORE_FIELDS = (Field('C', 31), Field('V', 30), Field('SV', 29), Field('AV', 28),
+                   Field('SAV', 27), Field('FX', 26), Field('RM', 24, 2, _TRICORE_RM),
+                   Field('S', 14), Field('PRS', 12, 2), Field('IO', 10, 2, _TRICORE_IO),
+                   Field('IS', 9), Field('GW', 8), Field('CDE', 7), Field('CDC', 0, 7))
+_TRICORE_SFR = ['PC', 'PSW', 'PCXI', 'ISP', 'SYSCON', 'CPU_ID',
+                'FCX', 'LCX', 'BIV', 'BTV', 'ICR']
+
+
+def _tricore() -> ArchSpec:
+    regs = _regs([f'd{i}' for i in range(16)], tricore, 4, 'UC_TRICORE_REG_')
+    regs += _regs([f'a{i}' for i in range(16)], tricore, 4, 'UC_TRICORE_REG_')
+    regs += _regs(_TRICORE_SFR, tricore, 4, 'UC_TRICORE_REG_')
+    return ArchSpec('tricore', UC_ARCH_TRICORE, UC_MODE_LITTLE_ENDIAN,
+                    'tricore:LE:32:default', 'default', 'little', 32,
+                    tuple(regs), 'PC', 'a10',
+                    cs=_cs('CS_ARCH_TRICORE', 'CS_MODE_TRICORE_162'),
+                    call_mnemonics=('call', 'calla', 'calli',
+                                    'fcall', 'fcalla', 'fcalli'),
+                    status='PSW', fields=_TRICORE_FIELDS)
+
 def _cs(arch_name: str, *mode_names: str) -> Optional[Tuple[int, int]]:
     try:
         import capstone
@@ -258,12 +408,24 @@ SPECS: Dict[str, ArchSpec] = {}
 for _s in (_x86_64(), _x86_32(),
            _arm64(False), _arm64(True),
            _arm(False, False), _arm(True, False), _arm(False, True), _arm(True, True),
-           _mips(True, 32), _mips(False, 32), _mips(True, 64), _mips(False, 64)):
+           _mips(True, 32), _mips(False, 32), _mips(True, 64), _mips(False, 64),
+           _riscv(32), _riscv(64), _ppc(32), _ppc(64), _m68k(),
+           _sparc(32), _sparc(64), _tricore()):
     SPECS[_s.key] = _s
 
-# afl-unicorn dump names that differ from ours.
+# afl-unicorn dump names that differ from ours, plus the spellings people
+# reach for. afl-unicorn's dumpers only ever emit x64/x86/arm*/mips*, so the
+# architectures below it does not know contribute only convenience spellings.
 ALIASES = {'arm64': 'arm64le', 'arm': 'armle', 'x86_64': 'x64', 'amd64': 'x64',
-           'i386': 'x86', 'mips32': 'mips', 'mips32el': 'mipsel', 'aarch64': 'arm64le'}
+           'i386': 'x86', 'mips32': 'mips', 'mips32el': 'mipsel', 'aarch64': 'arm64le',
+           'rv32': 'riscv32', 'rv64': 'riscv64', 'riscv32i': 'riscv32',
+           'riscv64i': 'riscv64', 'riscv32le': 'riscv32', 'riscv64le': 'riscv64',
+           'ppc': 'ppc32', 'powerpc': 'ppc32', 'powerpc64': 'ppc64',
+           'ppc32be': 'ppc32', 'ppc64be': 'ppc64',
+           '68k': 'm68k', '68000': 'm68k', 'm68000': 'm68k', 'm68kbe': 'm68k',
+           'sparc': 'sparc32', 'sparcbe': 'sparc32', 'sparc32be': 'sparc32',
+           'sparc64be': 'sparc64', 'sparcv9': 'sparc64',
+           'tricore32': 'tricore', 'tc': 'tricore'}
 
 
 def spec_for_key(key: str) -> ArchSpec:
@@ -288,4 +450,14 @@ def spec_for_uc(uc) -> ArchSpec:
     if arch == UC_ARCH_MIPS:
         bits = 64 if mode & UC_MODE_MIPS64 else 32
         return SPECS['mips' + ('64' if bits == 64 else '') + ('' if big else 'el')]
+    if arch == UC_ARCH_RISCV:
+        return SPECS['riscv64' if mode & UC_MODE_RISCV64 else 'riscv32']
+    if arch == UC_ARCH_PPC:
+        return SPECS['ppc64' if mode & UC_MODE_PPC64 else 'ppc32']
+    if arch == UC_ARCH_SPARC:
+        return SPECS['sparc64' if mode & UC_MODE_SPARC64 else 'sparc32']
+    if arch == UC_ARCH_M68K:
+        return SPECS['m68k']
+    if arch == UC_ARCH_TRICORE:
+        return SPECS['tricore']
     raise KeyError(f"Unsupported Unicorn arch {arch} mode {mode:#x}")
