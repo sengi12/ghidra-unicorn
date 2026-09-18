@@ -237,9 +237,13 @@ def put_processes(state: str = 'STOPPED', reason: str = '') -> None:
 
 def put_state(state: str, reason: str = '') -> None:
     trace = STATE.require_trace()
+    target = STATE.target
     procobj = trace.proxy_object_path(_proc_path())
     procobj.set_value('State', state)
     procobj.set_value('Reason', reason)
+    # Where the target is in its own history, which is what the reverse
+    # methods count in.
+    procobj.set_value('Instruction', target.icount)
     trace.proxy_object_path(_thread_path()).set_value('State', state)
 
 

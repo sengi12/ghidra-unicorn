@@ -327,6 +327,27 @@ def test_ghidra_reverse_methods_are_registered():
         assert entries[name].icon == icon
 
 
+def test_the_trace_carries_the_instruction_count():
+    from ghidraunicorn import commands
+    from ghidraunicorn.loaders import Loaded
+
+    from test_commands import FakeTrace
+
+    t = make_tt(interval=2)
+    commands.STATE.loaded = Loaded(t, [], 'test')
+    commands.STATE.trace = trace = FakeTrace()
+    try:
+        t.step(4)
+        commands.put_state('STOPPED', 'Stepped')
+        assert trace.objects['Processes[0]']['Instruction'] == 4
+        t.step_back(2)
+        commands.put_state('STOPPED', 'Stepped back')
+        assert trace.objects['Processes[0]']['Instruction'] == 2
+    finally:
+        commands.STATE.trace = None
+        commands.STATE.loaded = None
+
+
 def test_ghidra_reverse_methods_drive_the_target():
     from ghidraunicorn import commands, methods
     from ghidraunicorn.loaders import Loaded
