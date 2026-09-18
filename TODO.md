@@ -13,10 +13,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   `resume_back`, `step_back_into` and `step_back_over` so Ghidra's existing
   step-back toolbar buttons work, and add `rsi`/`rni`/`rc`/`goto` to the
   console. Only an emulator can offer this without something like rr.
-- [~] **Batch crash triage.** Replay a directory of afl-unicorn crashes,
-  capture the faulting instruction, registers and stack for each, group them
-  by crash site, and emit a table plus JSON. A companion tool turns that JSON
-  into Ghidra bookmarks and comments so the listing shows where crashes land.
 - [~] **More processors, and a Windows launcher.** RISC-V, PowerPC, m68k and
   SPARC are table entries in `arch.py`. Ghidra supports `.bat` and PowerShell
   launchers; we ship only the Unix one.
@@ -68,6 +64,20 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 - [ ] **Lazy memory for large dumps.** Preloading is capped at 32 MiB today
   and the rest is read on demand; make the cap region-aware so the regions
   that matter are resident and huge dumps stay usable.
+
+## Known bugs
+
+- [ ] **A stop forced from outside is reported as termination.** When a hook
+  that the target does not own calls `emu_stop` and the harness declared an
+  end address, `_emulate` takes its "reached the end" branch and returns
+  `exit`, even though the end was never reached. Triage works around it by
+  tracking its own instruction counter. The honest answer is `stopped`
+  whenever the program counter is not actually at the end or the requested
+  address.
+- [ ] **A fault's address is not on the stop event.** `UcError` carries only
+  an error number, so anything wanting the faulting access has to install its
+  own invalid-memory hook, as triage does. The target could record it once
+  and put it on the event.
 
 ## Known limitations
 

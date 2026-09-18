@@ -23,6 +23,23 @@ Notable changes to ghidra-unicorn. The format follows
   report an address, and a label inside a function does not describe
   addresses outside it. Not yet wired to a launcher option or to breakpoints
   by name.
+- **Batch crash triage** in `triage.py`, with a command line at
+  `python -m ghidraunicorn.triage`. It replays a directory of fuzzing inputs
+  through a harness, each in a fresh target, and reports the outcome, the
+  faulting instruction, the fault address, registers and a stack window for
+  each. Runs are bounded by an instruction budget and a wall clock, so an
+  input that loops forever is reported as a timeout rather than hanging.
+  Results are grouped by a replaceable crash signature, defaulting to the
+  fault kind and faulting address, and each group keeps the smallest input as
+  its representative. It exits non-zero when anything crashed, so it can gate
+  CI, and it imports nothing from the Ghidra side so it runs with no Ghidra
+  present. On the afl-unicorn sample it reduces four crash files to the three
+  distinct null reads in the target's source.
+- **`tools/import_triage.py`** paints a triage report onto a Ghidra program
+  as bookmarks and comments at each crash address, so the listing shows where
+  crashes land and how many inputs reach each one. Idempotent, with a
+  `--dry-run` that needs no Ghidra and an `--offset` for a different image
+  base.
 - **Input provenance** in `provenance.py`: a read hook over the input buffer
   that records which offsets were read and by which instruction, so a crash
   can be traced back to the bytes that reached it, along with which parts of
