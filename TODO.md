@@ -32,10 +32,10 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   memory functions; afl-unicorn's loader already carries a simple heap to
   lift. This is the biggest practical limit today: anything that leaves the
   binary has to be stubbed.
-- [ ] **Coverage handoff to ghidra-aflcov.** Record executed basic blocks
-  during a session and write a drcov file, so the blocks just stepped paint
-  in the same listing. aflcov already has a baseline-versus-crash diff view,
-  so comparing a crashing run with a clean one becomes one action.
+- [~] **Coverage handoff to ghidra-aflcov.** The recorder and drcov writer
+  are in `coverage.py`, proved byte-identical to afl-unicorn's writer, which
+  is what aflcov, Lighthouse and Dragondance read. Still to wire: a console
+  command and a launcher option to start recording and save on exit.
 - [ ] **Input provenance.** Tag the input buffer with a read hook and report
   which input offsets reach the faulting instruction, answering "which bytes
   do I have to change".

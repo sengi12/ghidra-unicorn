@@ -7,7 +7,15 @@ Notable changes to ghidra-unicorn. The format follows
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Basic-block coverage recording** in `coverage.py`: a `UC_HOOK_BLOCK`
+  recorder that sorts blocks into modules and writes drcov version 2, the
+  format ghidra-aflcov, Lighthouse and Dragondance read. Blocks outside every
+  declared module are attributed to the mapped region they landed in rather
+  than dropped. A test asserts the bytes are identical to afl-unicorn's own
+  writer for the same input, so the files are interchangeable. Not yet wired
+  to a console command or launcher option.
 
 ## [0.1.0] - 2026-09-18
 
