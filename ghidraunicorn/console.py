@@ -41,6 +41,12 @@ ghidra-unicorn commands (anything else is Python; `target`, `uc`, `commands` are
                          registers are in scope: cond 1 rdi == 0 && u32(rsp) > 4
   ignore NUM COUNT       pass NUM that many more times before stopping
   x/NFU ADDR             examine memory, e.g. x/8xw 0x2000, x/16xb sp, x/s 0x3000
+                         x/5i ADDR disassembles five instructions there
+  disas [ADDR] [N]       disassemble N instructions (default: around PC)
+  hd, hexdump ADDR [N]   hex and ASCII, 16 bytes a line
+  find PATTERN [START END]   search mapped memory: find "text", find 41424344,
+                         find 0xdeadbeef (a value of pointer width)
+  rwatch REG             stop when a register changes value
   r, regs [NAME [VALUE]] show registers, one register, or set one
                          flags and fields too: r ZF 1, r cpsr.T 1, r cpsr.M 0x13
   fields                 list the status register's bit fields
@@ -88,6 +94,35 @@ def split_commands(text: str) -> List[str]:
             if part:
                 out.append(part)
     return out
+
+
+def raw_words(text: str) -> List[str]:
+    """Split on whitespace, keeping the quotes.
+
+    `shlex` strips them, which loses the one thing that tells a quoted
+    search pattern from a run of hex digits: `find "abcd"` means those four
+    letters and `find abcd` means those two bytes.
+    """
+    words: List[str] = []
+    current: List[str] = []
+    quote = ''
+    for char in text:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ''
+        elif char in '\'"':
+            quote = char
+            current.append(char)
+        elif char.isspace():
+            if current:
+                words.append(''.join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        words.append(''.join(current))
+    return words
 
 
 def _split_line(line: str) -> List[str]:
@@ -183,6 +218,10 @@ class UnicornConsole(code.InteractiveConsole):
             'goto': self.cmd_goto, 'icount': self.cmd_icount,
             'b': self.cmd_break, 'break': self.cmd_break,
             'w': self.cmd_watch, 'watch': self.cmd_watch,
+            'rwatch': self.cmd_regwatch, 'watchreg': self.cmd_regwatch,
+            'disas': self.cmd_disas, 'disassemble': self.cmd_disas,
+            'hd': self.cmd_hexdump, 'hexdump': self.cmd_hexdump,
+            'find': self.cmd_find, 'search': self.cmd_find,
             'd': self.cmd_delete, 'delete': self.cmd_delete,
             'bl': self.cmd_breaklist, 'breakpoints': self.cmd_breaklist,
             'en': self.cmd_enable, 'dis': self.cmd_disable,
@@ -465,7 +504,8 @@ class UnicornConsole(code.InteractiveConsole):
     def cmd_examine(self, args: List[str]) -> None:
         spec = args[0][2:] if args[0].startswith('x/') else ''
         if len(args) < 2:
-            raise ValueError('usage: x/NFU ADDR   (N count, F x|d|s, U b|h|w|g)')
+            raise ValueError('usage: x/NFU ADDR   '
+                             '(N count, F x|d|s|i, U b|h|w|g)')
         addr = self.value(args[1])
         count = ''
         fmt = 'x'
@@ -473,11 +513,14 @@ class UnicornConsole(code.InteractiveConsole):
         for ch in spec:
             if ch.isdigit():
                 count += ch
-            elif ch in 'xds':
+            elif ch in 'xdsi':
                 fmt = ch
             elif ch in _UNITS:
                 unit = ch
         n = int(count) if count else 8
+        if fmt == 'i':
+            self.write(self.disassemble(addr, n))
+            return
         if fmt == 's':
             data = self.target.read(addr, min(n if count else 256, 4096))
             end = data.find(b'\x00')
@@ -497,6 +540,114 @@ class UnicornConsole(code.InteractiveConsole):
             else:
                 cells = ' '.join(f'{v}' for v in chunk)
             self.write(f'{addr + i * size:#x}: {cells}\n')
+
+    # ---- looking at code and memory --------------------------------------
+
+    def disassemble(self, address: int, count: int) -> str:
+        """`count` instructions from `address`, with names and a PC marker."""
+        t = self.target
+        if t.spec.cs is None:
+            return '(install capstone for disassembly)\n'
+        breaks = {b.address for b in t.breakpoints.values()
+                  if b.kind == EXECUTE and b.enabled}
+        pc = t.pc()
+        out = []
+        for _ in range(max(count, 1)):
+            insn = t.decode(address)
+            if insn is None:
+                out.append(f'   {address:#x}  (unmapped or undecodable)')
+                break
+            size, mnem, ops = insn
+            try:
+                raw = t.read(address, size).hex()
+            except UcError:
+                raw = ''
+            marker = ' \u2192 ' if address == pc else ('\u25cf  ' if address in breaks else '   ')
+            out.append(f'{marker}{address:#x}{self._symbol(address)}  '
+                       f'{raw:<16} {mnem:<8} {ops}')
+            address += size
+        return '\n'.join(out) + '\n'
+
+    def _symbol(self, address: int) -> str:
+        if self.symbols is None:
+            return ''
+        text = self.symbols.describe(address)
+        return f' <{text}>' if text else ''
+
+    def cmd_disas(self, args: List[str]) -> None:
+        address = self.value(args[1]) if len(args) > 1 else self.target.pc()
+        count = int(args[2], 0) if len(args) > 2 else 10
+        self.write(self.disassemble(address, count))
+
+    def cmd_hexdump(self, args: List[str]) -> None:
+        if len(args) < 2:
+            raise ValueError('usage: hexdump ADDR [N]')
+        address = self.value(args[1])
+        count = int(args[2], 0) if len(args) > 2 else 0x40
+        data = self.target.read(address, count)
+        for offset in range(0, len(data), 16):
+            row = data[offset:offset + 16]
+            cells = ' '.join(f'{b:02x}' for b in row)
+            text = ''.join(chr(b) if 0x20 <= b < 0x7f else '.' for b in row)
+            self.write(f'{address + offset:#012x}  {cells:<47}  |{text}|\n')
+
+    def cmd_find(self, args: List[str]) -> None:
+        words = raw_words(self._tail(1))
+        if not words:
+            raise ValueError('usage: find PATTERN [START END]   '
+                             'PATTERN is "text", hex bytes, or 0xVALUE')
+        pattern = self.pattern(words[0])
+        if not pattern:
+            raise ValueError('empty search pattern')
+        ranges = self.target.regions()
+        if len(words) > 2:
+            start, end = self.value(words[1]), self.value(words[2])
+            ranges = [(start, end - 1, 0)]
+        found = 0
+        for lo, hi, _ in ranges:
+            try:
+                data = self.target.read(lo, hi - lo + 1)
+            except UcError:
+                continue
+            at = data.find(pattern)
+            while at >= 0:
+                self.write(f'{lo + at:#012x}{self._symbol(lo + at)}\n')
+                found += 1
+                if found >= 200:
+                    self.write('(stopping at 200 matches)\n')
+                    return
+                at = data.find(pattern, at + 1)
+        self.write(f'{found} match(es) for {pattern.hex()}\n')
+
+    def pattern(self, text: str) -> bytes:
+        """A search pattern: "text", hex bytes, or a number of pointer width.
+
+        The three are told apart by how they are written, because guessing
+        would be worse: a quoted string is text, a bare `0x` number is a
+        value stored the way this architecture stores one, and an even run
+        of hex digits is those bytes in that order.
+        """
+        text = text.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in '\'"':
+            return text[1:-1].encode('utf-8', 'surrogateescape')
+        if text.lower().startswith('0x'):
+            spec = self.target.spec
+            return int(text, 16).to_bytes(spec.ptr_size, spec.endian)
+        cleaned = text.replace(' ', '')
+        if cleaned and len(cleaned) % 2 == 0:
+            try:
+                return bytes.fromhex(cleaned)
+            except ValueError:
+                pass
+        return text.encode('utf-8', 'surrogateescape')
+
+    def cmd_regwatch(self, args: List[str]) -> None:
+        if len(args) < 2:
+            raise ValueError('usage: rwatch REGISTER')
+        bp = self.target.add_register_watch(args[1])
+        self.write(f'watchpoint {bp.num}: {bp.describe()} '
+                   f'(now {bp.previous:#x})\n')
+        self._publish_bps()
 
     def cmd_regs(self, args: List[str]) -> None:
         t = self.target

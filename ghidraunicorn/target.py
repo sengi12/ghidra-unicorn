@@ -43,6 +43,11 @@ from .timeline import DEFAULT_BUDGET, DEFAULT_INTERVAL, Timeline
 PAGE = 0x1000
 
 READ, WRITE, ACCESS, EXECUTE = 'READ', 'WRITE', 'READ,WRITE', 'SW_EXECUTE'
+#: A watch on a register rather than on memory. Unicorn has no hook for one,
+#: so it is a comparison made once per instruction, and it costs that. It has
+#: no Ghidra equivalent either - the trace's breakpoint kinds are all about
+#: addresses - so it lives in the console and is not published.
+REGISTER = 'REGISTER'
 
 #: How far behind a requested stop address Unicorn may leave the program
 #: counter and still be considered to have arrived: one instruction, and the
@@ -88,6 +93,9 @@ class Breakpoint:
     #: that raises stops anyway, because a breakpoint that silently never
     #: fires is far harder to notice than one that stops and says why.
     condition_error: str = ''
+    #: For a REGISTER watch: which register, and what it last held.
+    register: Optional[str] = None
+    previous: Optional[int] = None
     _hooks: List[int] = field(default_factory=list)
     _code: object = None          # the compiled condition
 
@@ -98,6 +106,8 @@ class Breakpoint:
     def describe(self) -> str:
         if self.kind == EXECUTE:
             where = f'*{self.address:#x}'
+        elif self.kind == REGISTER:
+            where = f'${self.register}'
         else:
             where = f'{self.kind.lower()} {self.address:#x}+{self.size}'
         if self.condition:
@@ -153,6 +163,7 @@ class UnicornTarget:
         self.breakpoints: Dict[int, Breakpoint] = {}
         self._next_bp = 1
         self._bp_by_addr: Dict[int, Breakpoint] = {}
+        self._reg_watches: List[Breakpoint] = []
         self._temp: Set[int] = set()
         self._running = False
         self._first = False
@@ -335,6 +346,21 @@ class UnicornTarget:
         self._install_watch(bp)
         return bp
 
+    def add_register_watch(self, register: str) -> Breakpoint:
+        """Stop when `register` changes value.
+
+        There is no Unicorn hook for this, so it is a comparison made once
+        per instruction from the code hook that is already there. That is
+        the whole cost, and it is only paid while such a watch exists.
+        """
+        value = self.reg_read(register)          # KeyError for a bad name
+        bp = Breakpoint(self._next_bp, REGISTER, 0, 1, register=register,
+                        previous=value)
+        self._next_bp += 1
+        self.breakpoints[bp.num] = bp
+        self._reg_watches.append(bp)
+        return bp
+
     def _install_watch(self, bp: Breakpoint) -> None:
         types = 0
         if bp.kind in (READ, ACCESS):
@@ -443,6 +469,8 @@ class UnicornTarget:
         if bp.kind == EXECUTE:
             if self._bp_by_addr.get(bp.address) is bp:
                 del self._bp_by_addr[bp.address]
+        if bp in self._reg_watches:
+            self._reg_watches.remove(bp)
         for h in bp._hooks:
             self.uc.hook_del(h)
 
@@ -495,6 +523,13 @@ class UnicornTarget:
             self._halting = True
             uc.emu_stop()
             return
+        if self._reg_watches:
+            changed = self._changed_register(address)
+            if changed is not None:
+                self._stop = changed
+                self._halting = True
+                uc.emu_stop()
+                return
         bp = self._bp_by_addr.get(address)
         if bp is not None and bp.enabled and self._triggers(bp):
             self._stop = StopEvent('breakpoint', address,
@@ -536,6 +571,47 @@ class UnicornTarget:
     def hits_at(self, icount: int, num: int) -> bool:
         """Whether breakpoint `num` is already recorded as firing at `icount`."""
         return any(h.icount == icount and h.num == num for h in self._hits)
+
+    def _changed_register(self, address: int) -> Optional[StopEvent]:
+        """The first register watch whose register moved since last time.
+
+        The check runs before each instruction, so a change is noticed once
+        the instruction that made it has finished - which is where a memory
+        watchpoint stops too, and means resuming never re-runs it.
+        """
+        for bp in self._reg_watches:
+            if not bp.enabled:
+                continue
+            try:
+                value = self.reg_read(bp.register)
+            except (KeyError, UcError):
+                continue
+            if bp.previous is None:
+                bp.previous = value
+                continue
+            if value == bp.previous:
+                continue
+            old, bp.previous = bp.previous, value
+            # `previous` moves whether or not this one stops, so a rejected
+            # change is not reported again at the next instruction.
+            if not self._triggers(bp, {'old': old, 'new': value, 'value': value,
+                                       'register': bp.register}):
+                continue
+            return StopEvent(
+                'watchpoint', address,
+                f'Watchpoint {bp.num}: {bp.register} {old:#x} -> {value:#x}'
+                + _condition_note(bp), bp)
+        return None
+
+    def _resync_register_watches(self) -> None:
+        """After a rewind, what a register held before is whatever it holds
+        now; otherwise the next instruction reports a change that the machine
+        did not make."""
+        for bp in self._reg_watches:
+            try:
+                bp.previous = self.reg_read(bp.register)
+            except (KeyError, UcError):
+                bp.previous = None
 
     def _on_invalid(self, uc, access, address, size, value, user_data) -> bool:
         """Remember the access Unicorn is about to refuse.
@@ -911,6 +987,7 @@ class UnicornTarget:
         for log in self.effect_logs:
             log.truncate(k)
         self._undo_hits(k)
+        self._resync_register_watches()
 
     def _history_pcs(self, lo: int, hi: int) -> Dict[int, int]:
         """The PC at each instruction in [lo, hi], by replaying from the

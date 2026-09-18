@@ -9,6 +9,25 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **Console extras.** `disas [ADDR] [N]` disassembles with symbol names, a
+  marker on the program counter and a dot on each breakpoint, and `x/5i`
+  does the same through the examine command. `hexdump ADDR [N]` (`hd`) shows
+  bytes and an ASCII pane. `find` searches every mapped region, or a given
+  range, and tells the three kinds of pattern apart by how they are written:
+  `find "text"` is those characters, `find 41424344` is those bytes, and
+  `find 0xdeadbeef` is a value stored the way this architecture stores one -
+  which matters, because `abcd` is both a word and a pair of bytes and
+  guessing would be worse than asking.
+
+  `rwatch REG` stops when a register changes. Unicorn has no hook for that,
+  so it is a comparison made once per instruction from the code hook that is
+  already there, and it costs that only while such a watch exists. It is an
+  ordinary breakpoint otherwise - numbered, listed, conditional (`old`,
+  `new` and `register` are in scope), with a hit count that rewinds - except
+  that it is not published to Ghidra, whose breakpoint kinds are all about
+  addresses. Going back in time resyncs it, so a rewind is not reported as a
+  change the programme made.
+
 - **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
   runs console commands as soon as the target is loaded, from the command
   line or from a file with `--commands-file`, and `--batch` then exits

@@ -16,7 +16,7 @@ from ghidratrace.client import (Address, Client, RegVal, Trace, TraceObject,
                                 Transaction)
 
 from .loaders import Loaded, Module
-from .target import EXECUTE, Breakpoint, StopEvent, UnicornTarget
+from .target import EXECUTE, REGISTER, Breakpoint, StopEvent, UnicornTarget
 
 PAGE_SIZE = 4096
 # Trace RMI refuses messages over 64 KiB; keep byte payloads well under it.
@@ -405,6 +405,11 @@ def put_breakpoints() -> None:
     keys: List[str] = []
     pkeys: List[str] = []
     for bp in target.breakpoints.values():
+        if bp.kind == REGISTER:
+            # Ghidra's breakpoint kinds are all about addresses, and a
+            # register watch has none. It stays a console feature rather
+            # than being published at a made-up location.
+            continue
         keys.append(BREAK_KEY_PATTERN.format(breaknum=bp.num))
         bpath = BREAK_PATTERN.format(breaknum=bp.num)
         bobj = trace.create_object(bpath)

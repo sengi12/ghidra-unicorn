@@ -7,8 +7,8 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Console extras.** `disas`, memory search, a hexdump with an ASCII
-  pane, `x/i`, and register watchpoints.
+- [ ] **Session recording.** Log every command and stop to a file so a triage
+  session can be replayed or attached to a bug report.
 
 ## Later
 
@@ -21,8 +21,6 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
   same program under both engines and compare registers each step. A
   disagreement is a bug in a SLEIGH specification or in Unicorn, which makes
   this a useful test as well as a research tool.
-- [ ] **Session recording.** Log every command and stop to a file so a triage
-  session can be replayed or attached to a bug report.
 - [ ] **Lazy memory for large dumps.** Preloading is capped at 32 MiB today
   and the rest is read on demand; make the cap region-aware so the regions
   that matter are resident and huge dumps stay usable.

@@ -75,7 +75,9 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   dereferenced, the decoded status register, disassembly around PC and the
   stack; and it takes short commands (`c`, `si`, `ni`, `b`, `watch`, `x/8xw`,
   `r cpsr.M 0x13`...). Anything else is Python with `target` and `uc` in
-  scope.
+  scope. `disas` and `x/5i` disassemble, `hd` is a hexdump with an ASCII
+  pane, `find` searches memory for text, bytes or a value, and `rwatch RAX`
+  stops the moment a register changes.
 
 Tested with Ghidra 12.1.3 (JDK 21) and Unicorn 2.1.
 
