@@ -180,6 +180,13 @@ Notable changes to ghidra-unicorn. The format follows
   out. A breakpoint on a stubbed function still stops before the stub stands
   in for it.
 
+  Triage gets them too, with `--no-syscalls` and `--no-stubs` to turn them
+  off: a harness that reads its input with `read` would otherwise fault on
+  the trap and be triaged as a crash in the program rather than as a harness
+  that left the binary. A call the layer did not know is reported in the
+  result and in the report, because a fault just after one of those is far
+  more likely to be the missing call than a bug in the target.
+
   Both layers are on by default, opt out per run or per harness, and both are
   correct under reverse execution - which is the hard part, and is what
   `effects.py` is for. A system call is not a pure function of the machine

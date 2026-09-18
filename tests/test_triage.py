@@ -489,3 +489,86 @@ def test_import_triage_rejects_a_file_that_is_not_a_report(tmp_path):
     p.write_text('{"hello": 1}')
     with pytest.raises(SystemExit):
         tool.load_report(str(p))
+
+
+# ---- triage runs harnesses that leave the binary ---------------------------
+
+SYSCALL_HARNESS = '''
+from unicorn import UC_ARCH_X86, UC_MODE_64, Uc
+from unicorn.x86_const import UC_X86_REG_RIP, UC_X86_REG_RSP
+
+START = 0x1000
+STDIN = b"triaged"
+
+def create(input_file=None):
+    uc = Uc(UC_ARCH_X86, UC_MODE_64)
+    uc.mem_map(0x1000, 0x1000)
+    uc.mem_map(0x2000, 0x1000)
+    # read(0, 0x2000, 8) ; then exit(0)
+    uc.mem_write(0x1000, bytes.fromhex(
+        "4831c0" "4831ff" "48c7c600200000" "48c7c208000000" "0f05"
+        "48c7c03c000000" "4831ff" "0f05"))
+    uc.reg_write(UC_X86_REG_RIP, 0x1000)
+    uc.reg_write(UC_X86_REG_RSP, 0x2f00)
+    return uc
+'''
+
+UNKNOWN_CALL_HARNESS = SYSCALL_HARNESS.replace(
+    '"4831c0" "4831ff"', '"48c7c0adde0000" "4831ff"')
+
+
+def write_harness(tmp_path, text, name='h.py'):
+    path = tmp_path / name
+    path.write_text(text)
+    return str(path)
+
+
+def test_triage_services_a_harness_that_uses_system_calls(tmp_path):
+    """Without the layer the trap faults, and the input is triaged as a
+    crash in the program rather than as a harness that left the binary."""
+    harness = write_harness(tmp_path, SYSCALL_HARNESS)
+    sample = tmp_path / 'in.bin'
+    sample.write_bytes(b'abcd')
+    result = triage.triage_input(harness, str(sample))
+    assert result.outcome == triage.OK, result.description
+    assert result.unhandled_calls == ()
+
+
+def test_triage_can_be_told_not_to(tmp_path):
+    harness = write_harness(tmp_path, SYSCALL_HARNESS)
+    sample = tmp_path / 'in.bin'
+    sample.write_bytes(b'abcd')
+    result = triage.triage_input(harness, str(sample),
+                                 syscalls=False, stubs=False)
+    assert result.outcome != triage.OK, 'the trap was serviced anyway'
+
+
+def test_an_unserviced_call_is_reported(tmp_path):
+    harness = write_harness(tmp_path, UNKNOWN_CALL_HARNESS)
+    sample = tmp_path / 'in.bin'
+    sample.write_bytes(b'abcd')
+    result = triage.triage_input(harness, str(sample))
+    assert 0xdead in result.unhandled_calls
+
+
+def test_the_report_says_when_calls_went_unserviced(tmp_path):
+    import io
+    harness = write_harness(tmp_path, UNKNOWN_CALL_HARNESS)
+    sample = tmp_path / 'in.bin'
+    sample.write_bytes(b'abcd')
+    report = triage.triage_inputs(harness, [str(sample)])
+    out = io.StringIO()
+    triage.print_report(report, stream=out)
+    assert 'went unserviced' in out.getvalue()
+    assert '57005' in out.getvalue()        # 0xdead
+
+
+def test_nothing_is_said_when_every_call_was_serviced(tmp_path):
+    import io
+    harness = write_harness(tmp_path, SYSCALL_HARNESS)
+    sample = tmp_path / 'in.bin'
+    sample.write_bytes(b'abcd')
+    report = triage.triage_inputs(harness, [str(sample)])
+    out = io.StringIO()
+    triage.print_report(report, stream=out)
+    assert 'went unserviced' not in out.getvalue()

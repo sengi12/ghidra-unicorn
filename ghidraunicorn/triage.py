@@ -164,6 +164,10 @@ class InputResult:
     #: Basic blocks executed, and where the drcov file was written.
     blocks: int = 0
     coverage_path: str = ''
+    #: System call numbers the Linux layer did not know. A fault soon after
+    #: one of these is much more likely to be the missing call than a bug in
+    #: the program, so it is reported rather than left to be guessed at.
+    unhandled_calls: Tuple[int, ...] = ()
 
     @property
     def name(self) -> str:
@@ -421,6 +425,7 @@ def triage_input(harness: str, input_path: str, *,
                  signature: Callable[[InputResult], str] = DEFAULT_SIGNATURE,
                  input_at: Optional[int] = None,
                  coverage_dir: Optional[str] = None,
+                 syscalls: bool = True, stubs: bool = True,
                  ) -> InputResult:
     """Replay one input on a freshly built engine and report what it did."""
     try:
@@ -438,6 +443,11 @@ def triage_input(harness: str, input_path: str, *,
             wall_time=time.monotonic() - started), signature)
 
     target = loaded.target
+    # A harness that reads its input with `read` or allocates with `malloc`
+    # would otherwise fault the moment it left the binary, and be triaged as
+    # a crash in the program rather than as one in the set-up.
+    layers = loaders.install_layers(loaded, syscalls=syscalls, stubs=stubs,
+                                    on_output=lambda fd, data: None)
     prov = _provenance(target, loaded, input_at, size)
     if prov is not None:
         prov.start()
@@ -503,8 +513,20 @@ def triage_input(harness: str, input_path: str, *,
         input_at_fault=() if prov is None or pc is None
         else tuple(ranges(prov.reads_at(pc))),
         blocks=0 if cov is None else cov.block_count,
+        unhandled_calls=_unhandled(layers),
         coverage_path='' if cov is None else _save_coverage(cov, coverage_dir, input_path)),
         signature)
+
+
+def _unhandled(layers) -> Tuple[int, ...]:
+    """System call numbers the layer did not know.
+
+    Worth reporting: a crash just after one of these is far more likely to
+    be the missing call than a bug in the program, and without this it looks
+    like any other fault.
+    """
+    layer = layers.get('syscalls') if layers else None
+    return tuple(sorted(layer.unknown)) if layer is not None else ()
 
 
 def _safe_name(name: str) -> str:
@@ -614,6 +636,7 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
                   progress: Optional[Callable[[InputResult], None]] = None,
                   input_at: Optional[int] = None,
                   coverage_dir: Optional[str] = None,
+                  syscalls: bool = True, stubs: bool = True,
                   ) -> TriageReport:
     """Replay every input through `harness` and group the outcomes.
 
@@ -628,7 +651,8 @@ def triage_inputs(harness: str, inputs: Iterable[str], *,
         r = triage_input(harness, path, start=start, end=end, image=image,
                          max_instructions=max_instructions, timeout=timeout,
                          stack_bytes=stack_bytes, signature=signature,
-                         input_at=input_at, coverage_dir=coverage_dir)
+                         input_at=input_at, coverage_dir=coverage_dir,
+                         syscalls=syscalls, stubs=stubs)
         report.results.append(r)
         if progress is not None:
             progress(r)
@@ -727,6 +751,12 @@ def print_report(report: TriageReport, stream=None, detail: bool = True,
           f': {summary or "nothing ran"}', file=out)
     print(f'{len(report.groups)} distinct signatures '
           f'({len(report.crash_groups)} crashing)', file=out)
+    unhandled = sorted({n for r in report.results for n in r.unhandled_calls})
+    if unhandled:
+        print(f'note: {len(unhandled)} system call(s) went unserviced '
+              f'({", ".join(str(n) for n in unhandled)}); a fault just after '
+              f'one of those is more likely to be the missing call than a bug '
+              f'in the program', file=out)
     print(file=out)
     print(format_groups(report), file=out)
     if detail and report.results:
@@ -778,6 +808,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help='how inputs are grouped (default kind-pc)')
     p.add_argument('--quiet', action='store_true',
                    help='only the group table, no per-input rows')
+    p.add_argument('--no-syscalls', action='store_true',
+                   help='do not service the harness\'s system calls; a trap '
+                        'then faults, as it did before the layer existed')
+    p.add_argument('--no-stubs', action='store_true',
+                   help='do not stand in for malloc and the string functions')
     p.add_argument('--verbose', action='store_true',
                    help='also registers, stack and fault detail per group')
     p.add_argument('--progress', action='store_true',
@@ -806,7 +841,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             max_instructions=args.max_instructions, timeout=args.timeout,
             stack_bytes=args.stack_bytes, signature=SIGNATURES[args.signature],
             limit=args.limit, progress=progress, input_at=_addr(args.input_at),
-            coverage_dir=args.coverage_dir)
+            coverage_dir=args.coverage_dir,
+            syscalls=not args.no_syscalls, stubs=not args.no_stubs)
     except FileNotFoundError as e:
         print(f'no such input: {e}', file=sys.stderr)
         return 2

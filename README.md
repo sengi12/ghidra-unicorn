@@ -513,6 +513,10 @@ exactly the same bytes at exactly the same address.
 with no libc and no kernel that reads, allocates, measures, prints and
 exits.
 
+Triage gets both layers as well (`--no-syscalls` and `--no-stubs` turn them
+off), and reports any call it did not know: a fault just after one of those
+is much more likely to be the missing call than a bug in the target.
+
 ## Coverage and input provenance
 
 `ghidraunicorn.coverage` records the basic blocks a run executed and writes
