@@ -7,53 +7,49 @@ Status: `[ ]` not started, `[~]` in progress, `[x]` done and in the changelog.
 
 ## Next
 
-- [ ] **Syscall and function stubs.** Dispatch `syscall` / `svc` / `sc` to
-  Python handlers, with a small Linux layer for read, write, mmap, brk and
-  exit. Add symbol-driven stubs for malloc, free and the common string and
-  memory functions; afl-unicorn's loader already carries a simple heap to
-  lift. This is the biggest practical limit today: anything that leaves the
-  binary has to be stubbed.
-- [ ] **Conditional breakpoints, hit and ignore counts.** Ghidra's breakpoint
-  model already carries Condition and Ignore Count; populate them and
-  evaluate a Python predicate in the hook.
+These two need a running Ghidra to build against, so they are last.
 
-## Later
+- [~] **A context panel inside Ghidra.** Written as
+  `ghidra_scripts/UnicornContextPanel.py`, drawing the same view the console
+  prints, from the trace rather than from the emulator. As the item said, it
+  needed nothing new on the Python side - only that `context.py` render from
+  a small surface instead of from the target, which it now documents and
+  which a test pins down by rendering both ways and comparing.
 
-- [ ] **A context panel inside Ghidra.** A docking `ComponentProvider` in a
-  Ghidra script, in the style of ghidra-hexEditor and ghidra-aflcov, showing
-  the gef-style register, pointer-chain and stack view in a window instead of
-  the terminal. It needs nothing new on the Python side: everything it would
-  draw is already in the trace.
-- [ ] **Differential execution against Ghidra's p-code emulator.** Run the
-  same program under both engines and compare registers each step. A
-  disagreement is a bug in a SLEIGH specification or in Unicorn, which makes
-  this a useful test as well as a research tool.
-- [ ] **Thumb tracking.** Follow `cpsr.T` per instruction and keep Ghidra's
-  `TMode` context register in step, so mixed ARM and Thumb code disassembles
-  correctly rather than being pinned to the language chosen at launch.
-- [ ] **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
-  for runs with no GUI, so a session can be scripted and used in CI.
-- [ ] **Console extras.** `disas`, memory search, a hexdump with an ASCII
-  pane, `x/i`, and register watchpoints.
-- [ ] **Session recording.** Log every command and stop to a file so a triage
-  session can be replayed or attached to a bug report.
-- [ ] **Lazy memory for large dumps.** Preloading is capped at 32 MiB today
-  and the rest is read on demand; make the cap region-aware so the regions
-  that matter are resident and huge dumps stay usable.
+  It is a **floating window, not a docked `ComponentProvider`**, and that is
+  not laziness: `docking.ComponentProvider` is an abstract class with an
+  abstract method, Ghidra ships no concrete one, and JPype cannot extend
+  Java classes at all. A docked version has to be written in Java, and a
+  Java panel cannot call this renderer - it would have to reimplement
+  `context.py`, and then two views of the same machine could disagree. If a
+  docked panel is wanted enough to pay that price, that is a new item, not
+  this one.
+
+  Every Ghidra and JPype call in it has been checked against Ghidra's own
+  source and a real JPype, which found three mistakes; it has still not been
+  *run*. Do that once on a machine with Ghidra 12.1.3.
+- [~] **Differential execution against Ghidra's p-code emulator.** The
+  comparison is written and tested (`differential.py`, Unicorn against
+  Unicorn, with deliberate divergences so the machinery is shown to be able
+  to fail). The p-code side and `tools/differential.py` are written and
+  every `EmulatorHelper` call has been checked against Ghidra's source,
+  which found three mistakes, but it has not been *run*. Do that once on a
+  machine with Ghidra 12.1.3, against the afl-unicorn sample.
 
 ## Known bugs
 
-- [ ] **Reverse execution cannot rewind a mapping.** A region mapped after
-  the base checkpoint stays mapped when you go back to before it existed.
-  Missing regions are restored; extra ones are not unmapped.
-- [ ] **Reverse-continue finds execute breakpoints only**, not watchpoint
-  hits, and it does not adjust hit counts as it passes them.
-- [ ] **Step-over backwards replays the whole retained history** to work out
-  call depth, so it costs time proportional to what is kept rather than to
-  the distance travelled.
+None known. The three reverse-execution bugs listed here are fixed and are
+in the changelog under Unreleased.
 
 Fixed, kept here until the next release notes ship:
 
+- [x] Reverse-continue found execute breakpoints only, never a watchpoint
+  hit, and hit counts did not move as it passed them.
+- [x] Step-over backwards replayed the whole retained history to work out
+  call depth.
+- [x] A region mapped after a checkpoint survived a rewind to before it
+  existed, because restoring mapped missing regions back but never unmapped
+  extra ones.
 - [x] A flag register had to be exactly one bit, which kept m68k's interrupt
   level and PowerPC's `xer_count` out of the Registers window.
 - [x] A stop forced by an unrelated hook was reported as termination when an
@@ -71,5 +67,13 @@ worth stating.
 - One thread and one frame. Unicorn has no threads, and Ghidra unwinds the
   stack itself from the registers and memory the connector publishes.
 - Step-over needs Capstone to recognise a call; without it, it steps into.
-- No operating system. A harness has to map its own memory and either avoid
-  syscalls or stub them, until the stubs item above lands.
+- The operating system under the emulator is a small one. `syscalls.py`
+  services the calls a harness usually needs and nothing else; anything it
+  does not know comes back as ENOSYS, which is visible in `sys` rather than
+  silent. There is deliberately no host filesystem behind `open`.
+- A stubbed function is one step, not a step into: a stub stands in for the
+  whole call, so `s` over a stubbed `malloc` returns from it. A breakpoint on
+  it still stops before it.
+- SPARC and TriCore have calling conventions but no system call table, and
+  Unicorn 2.1.4 cannot map memory for TriCore at all, so nothing can be
+  emulated on it here.

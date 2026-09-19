@@ -24,7 +24,7 @@ import json
 import os
 import sys
 import zlib
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from unicorn import UC_PROT_EXEC, UC_PROT_READ, UC_PROT_WRITE, Uc, UcError
 
@@ -53,6 +53,9 @@ class Loaded:
     #: Where the harness put the fuzz input, as (base, maximum size), when it
     #: says so. Triage uses it to report which input bytes a crash read.
     input_region: Optional[Tuple[int, int]] = None
+    #: The harness module, when the target came from one. `install_layers`
+    #: reads its opt-outs from here; an afl-unicorn dump has no module.
+    module: object = None
 
 
 def _parse_addr(value) -> Optional[int]:
@@ -119,7 +122,7 @@ def load_harness(path: str, input_file: Optional[str] = None,
     if not modules:
         modules = default_modules(target, image)
     return Loaded(target, modules, f'harness {os.path.basename(path)}',
-                  input_region=_input_region(mod))
+                  input_region=_input_region(mod), module=mod)
 
 
 def _input_region(mod) -> Optional[Tuple[int, int]]:
@@ -228,3 +231,71 @@ def _map_segment(uc: Uc, seg, directory: str) -> None:
         with open(path, 'rb') as f:
             data = zlib.decompress(f.read())
         uc.mem_write(seg['start'], data[:seg['end'] - seg['start']])
+
+
+# ---------------------------------------------------------------------------
+# Standing in for the operating system
+
+def install_layers(loaded: Loaded, harness=None, *, syscalls: bool = True,
+                   stubs: bool = True, symbols=None, stdin: bytes = b'',
+                   files: Optional[Dict[str, bytes]] = None,
+                   on_output=None, trace: bool = False) -> Dict[str, object]:
+    """Put the system call and function stub layers under a loaded target.
+
+    Both are opt-out rather than opt-in, because a target that traps into a
+    kernel that is not there simply stops, and that is never what the person
+    running it wanted. Neither can do any harm where it is not used: the
+    system call layer only acts on the trap numbers its architecture uses,
+    and a stub only exists at an address a symbol put it at.
+
+    A harness can say otherwise for itself with module-level `SYSCALLS` or
+    `STUBS` set to False, `STDIN` for the bytes the program reads from its
+    standard input, and `FILES` for the only files it will be able to open.
+    Arguments given here win over the harness, which wins over the defaults.
+
+    Returns what was installed, for reporting.
+    """
+    from . import stubs as stubs_mod
+    from . import syscalls as syscalls_mod
+
+    target = loaded.target
+    harness = harness if harness is not None else loaded.module
+    if harness is not None:
+        syscalls = syscalls and getattr(harness, 'SYSCALLS', True)
+        stubs = stubs and getattr(harness, 'STUBS', True)
+        stdin = stdin or _as_bytes(getattr(harness, 'STDIN', b''))
+        files = files or {k: _as_bytes(v)
+                          for k, v in (getattr(harness, 'FILES', None) or {}).items()}
+    installed: Dict[str, object] = {}
+    if syscalls and syscalls_mod.available(target.spec.key):
+        installed['syscalls'] = syscalls_mod.install(
+            target, stdin=stdin, files=files, on_output=on_output, trace=trace)
+    if stubs and stubs_mod.available(target.spec.key):
+        layer = stubs_mod.install(target, symbols, on_output=on_output, trace=trace)
+        # A raw binary has no symbol table, so a harness may name the
+        # addresses itself: STUBS_AT = {'malloc': 0x400800}.
+        for name, address in (getattr(harness, 'STUBS_AT', None) or {}).items():
+            # A typo in a harness's own table must not stop the launch: say
+            # which one and carry on, because everything else still works.
+            try:
+                where = _parse_addr(address)
+                if where is None:
+                    raise ValueError(f'no address for {name}')
+                layer.bind(name, where)
+            except (KeyError, ValueError, TypeError) as e:
+                print(f'STUBS_AT: not binding {name}: {e}', flush=True)
+        # With no symbols nothing is bound, and an empty stub layer is just
+        # overhead; keep it anyway so a person can bind by hand from the
+        # console, which is the whole point of having it there.
+        installed['stubs'] = layer
+    return installed
+
+
+def _as_bytes(value) -> bytes:
+    if value is None:
+        return b''
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode()
+    return bytes(value)

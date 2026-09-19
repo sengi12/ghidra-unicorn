@@ -170,3 +170,111 @@ def test_provenance_command_reports_reads():
     c.push('prov')
     text = out.getvalue()
     assert 'read:   0-7' in text and 'unread: 8-15' in text
+
+
+# ---- standing in for what is not there ------------------------------------
+
+def test_console_reports_when_there_is_no_layer():
+    t, c, out = make_console()
+    c.push('sys')
+    c.push('stub')
+    c.push('heap')
+    text = out.getvalue()
+    assert 'no system call layer' in text
+    assert 'no stub layer' in text and 'no heap' in text
+
+
+def test_console_shows_the_system_call_layer():
+    from ghidraunicorn import syscalls
+    t, c, out = make_console()
+    layer = syscalls.install(t)
+    c.push('sys')
+    assert 'x64 Linux' in out.getvalue()
+    assert 'nothing called yet' in out.getvalue()
+
+
+def test_console_binds_and_lists_a_stub():
+    from ghidraunicorn import stubs
+    t, c, out = make_console()
+    stubs.install(t)
+    c.push('stub malloc 0x1027')
+    assert 'malloc stands in at 0x1027' in out.getvalue()
+    c.push('stub')
+    assert '0x1027' in out.getvalue() and 'malloc' in out.getvalue()
+    c.push('heap')
+    assert 'heap 0x' in out.getvalue()
+
+
+def test_console_refuses_a_half_given_stub():
+    from ghidraunicorn import stubs
+    t, c, out = make_console()
+    stubs.install(t)
+    c.push('stub malloc')
+    assert 'usage: stub NAME ADDR' in out.getvalue()
+
+
+# ---- the context renders from anything with the target's surface ----------
+
+class FakeSource:
+    """Everything `Context` needs, and nothing that is a UnicornTarget.
+
+    The panel inside Ghidra draws the same view from a trace, so this is the
+    check that the renderer really is separable from the emulator rather
+    than only looking as though it is.
+    """
+
+    def __init__(self, target):
+        self.spec = target.spec
+        self.breakpoints = {}
+        self._regs = dict(target.regs())
+        self._memory = {start: target.read(start, end - start + 1)
+                        for start, end, _ in target.regions()}
+        self._regions = target.regions()
+        self._decode = target.decode
+
+    def pc(self):
+        return self._regs[self.spec.pc]
+
+    def sp(self):
+        return self._regs[self.spec.sp]
+
+    def regs(self):
+        return dict(self._regs)
+
+    def reg_read(self, name):
+        return self._regs[self.spec.reg(name).name]
+
+    def regions(self):
+        return list(self._regions)
+
+    def read(self, address, size):
+        for start, data in self._memory.items():
+            if start <= address and address + size <= start + len(data):
+                return data[address - start:address - start + size]
+        raise ValueError(f'{address:#x} is not mapped')
+
+    def decode(self, address):
+        return self._decode(address)
+
+    def fields(self):
+        if self.spec.status is None:
+            return []
+        return self.spec.decode_fields(self._regs[self.spec.status])
+
+
+def test_the_context_renders_from_something_that_is_not_a_target():
+    t = make_x64()
+    t.step(3)
+    text = Context(FakeSource(t), io.StringIO(), color=False).render()
+    assert '[ registers ]' in text and '[ disassembly ]' in text
+    assert 'RAX' in text and '0x0000000000000003' in text
+    assert 'mov' in text
+
+
+def test_the_two_renderings_agree():
+    """Same state, same picture, whichever side it came from."""
+    t = make_x64()
+    t.step(3)
+    direct = Context(t, io.StringIO(), color=False).render()
+    indirect = Context(FakeSource(t), io.StringIO(), color=False).render()
+    assert direct == indirect

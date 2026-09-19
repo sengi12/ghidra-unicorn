@@ -9,6 +9,209 @@ Notable changes to ghidra-unicorn. The format follows
 
 ### Added
 
+- **A context panel inside Ghidra**, as
+  `ghidra_scripts/UnicornContextPanel.py`: a docking window drawing the same
+  gef-style view the console prints - registers with pointers dereferenced,
+  the decoded status register, disassembly and the stack - beside the
+  Listing instead of in a terminal. It follows the current trace and
+  snapshot, so scrubbing the Time window redraws it at that point in
+  history.
+
+  It needed nothing new from the connector, only that `context.py` be honest
+  about what it renders from. That surface is now written down - ten things,
+  no more - and the panel is the second implementation of it, over a Ghidra
+  trace. A test renders the same state through both a `UnicornTarget` and a
+  plain object providing only that surface and requires the two pictures to
+  be identical, which is what keeps the two from drifting. The one real
+  coupling it flushed out is fixed: the renderer caught Unicorn's own
+  exception when a read ran off the end of a mapping, which nothing but
+  Unicorn could have raised.
+
+  It is a floating window rather than the docked `ComponentProvider` the
+  roadmap asked for, because that cannot be written in Python at all:
+  `ComponentProvider` is an abstract class, Ghidra ships no concrete one,
+  and JPype refuses to extend Java classes - "Java classes cannot be
+  extended in Python". A docked panel would have to be Java, and Java could
+  not call this renderer, so it would have to reimplement it and the two
+  views of one machine could then disagree. A test now refuses any Ghidra
+  script that subclasses a Java class, so the mistake cannot come back.
+  **Still not run against a real Ghidra**, though every Ghidra and JPype
+  call has been checked against their sources.
+
+- **Differential execution against Ghidra's p-code emulator**, in
+  `differential.py`: both engines are put in the same state, stepped in
+  lockstep, and compared after every instruction, with the first
+  disagreement reported as the step, the instruction, and the registers that
+  differ with the xor of each pair. Unicorn and the p-code emulator
+  implement the same instruction sets from completely separate descriptions
+  of them, so a disagreement is a bug in one of them - and a check on this
+  connector's own tables, since a register name mapped to the wrong register
+  never matches. No mapping table is needed between the two, because
+  `arch.py` already names every register the way Ghidra's SLEIGH
+  specification does.
+
+  The comparison is tested by running Unicorn against Unicorn, with engines
+  deliberately made to disagree in each of the ways they can, so that a
+  comparison unable to report anything cannot pass. **The p-code half and
+  `tools/differential.py` have not yet been run against a real Ghidra**;
+  they were written on a machine that had none, and want one run against the
+  afl-unicorn sample before they are trusted.
+
+- **Preloading is region-aware.** The cap was applied to the regions in
+  address order, and the first region that did not fit stopped the loop
+  outright, so a dump with a large heap low in the address space filled the
+  budget before reaching the code and the stack and the Dynamic Listing came
+  up empty - the two regions anybody wants to see first were the ones most
+  likely to be missed. Regions are now ranked by what they are: the one
+  holding the program counter, then the stack pointer, then the input region
+  a harness declared, then a declared module, then anything executable, with
+  size as the tie-break so the budget buys as many as it can. A region too
+  large for what is left is no longer skipped either - a window of it is
+  copied around whatever made it interesting, because part of a huge region
+  is far more use than none of it and the rest is read on demand anyway. The
+  launch line now says what was preloaded and what was left.
+
+- **Session recording.** `--record PATH`, or `record PATH` in the console,
+  logs the session to a file that is both a transcript and a script. The
+  trick is that `#` already starts a comment, so the commands go in as
+  themselves, one per line, and everything else - the setup, what the target
+  printed, the full context at every stop - goes in behind a `#`. The result
+  reads as a transcript and replays with `--commands-file` without a word
+  being edited out of it, so there is no second format to keep in step with
+  the first. Stops are recorded by listening to the target rather than the
+  console, so one caused from Ghidra's buttons is logged like one caused by
+  a command typed here. Colour escapes are stripped on the way in.
+
+- **Console extras.** `disas [ADDR] [N]` disassembles with symbol names, a
+  marker on the program counter and a dot on each breakpoint, and `x/5i`
+  does the same through the examine command. `hexdump ADDR [N]` (`hd`) shows
+  bytes and an ASCII pane. `find` searches every mapped region, or a given
+  range, and tells the three kinds of pattern apart by how they are written:
+  `find "text"` is those characters, `find 41424344` is those bytes, and
+  `find 0xdeadbeef` is a value stored the way this architecture stores one -
+  which matters, because `abcd` is both a word and a pair of bytes and
+  guessing would be worse than asking.
+
+  `rwatch REG` stops when a register changes. Unicorn has no hook for that,
+  so it is a comparison made once per instruction from the code hook that is
+  already there, and it costs that only while such a watch exists. It is an
+  ordinary breakpoint otherwise - numbered, listed, conditional (`old`,
+  `new` and `register` are in scope), with a hit count that rewinds - except
+  that it is not published to Ghidra, whose breakpoint kinds are all about
+  addresses. Going back in time resyncs it, so a rewind is not reported as a
+  change the programme made.
+
+- **Batch and headless mode.** `--commands "b 0x100040; c; x/8xw 0x300000"`
+  runs console commands as soon as the target is loaded, from the command
+  line or from a file with `--commands-file`, and `--batch` then exits
+  instead of prompting. With `--batch` no Ghidra is needed at all: the
+  emulator, the console and everything the commands can reach work without a
+  trace, so a run can be scripted from CI. It is the same console the prompt
+  uses, so anything that can be typed can be scripted - and since anything
+  that is not a command is Python, `assert target.pc() == 0x1234` is how a
+  scripted run is made to fail. The exit status is non-zero when any command
+  failed, counting failed commands, Python exceptions, syntax errors, and a
+  script that ended part way through something (an unclosed bracket, which
+  at a prompt means "type more" and in a script means the rest was
+  swallowed). Commands split on newlines and semicolons, with quotes
+  respected and `#` starting a comment, so a breakpoint condition survives
+  being written in one.
+
+  Two things that only showed up once whole runs could be scripted are fixed
+  with it: a system call handler or a stub given a wild argument - a length
+  out of a register nobody set, a pointer from a function nobody stubbed -
+  raised out of `emu_start` and ended the session, where a kernel would
+  simply answer EINVAL; and a harness can now name its own stub addresses
+  with `STUBS_AT`, so a raw binary with no symbol table gets its stubs bound
+  without anyone typing `stub malloc 0x400800` first.
+
+- **Thumb tracking.** ARM code changes instruction set as it runs, and
+  everything that used to be settled by the language the target was launched
+  with now follows the processor instead: the T flag in the status register
+  is the one source of truth, and the decoder, the address emulation is
+  resumed from, and the `TMode` context register Ghidra disassembles by are
+  all derived from it. A stop in Thumb code is published as Thumb, so mixed
+  code comes up right in the Dynamic Listing rather than four-byte ARM
+  instructions laid over two-byte Thumb ones. Two Unicorn behaviours made
+  this necessary and are now covered by tests: `emu_start` decides how to
+  decode from the low bit of the address it is given and *not* from the T
+  flag, so resuming a Thumb program counter without that bit reads the wrong
+  instruction at the wrong width; and creating the engine with
+  `UC_MODE_THUMB` does not set the T flag at all, so a Thumb target used to
+  begin life claiming to be in ARM state. Writing the program counter on ARM
+  is itself a `bx` - the low bit selects the instruction set and never
+  reaches the register - so moving it now keeps the instruction set it was
+  in, and the T flag is how a change is asked for.
+
+- **Conditional breakpoints, hit and ignore counts.** A breakpoint or
+  watchpoint can carry a Python expression that has to be true before it
+  stops, and an ignore count that passes it a given number of times first.
+  Registers are in scope by name in either case, along with `pc`, `sp`,
+  `icount`, `hits`, `reg()` for the names that are not identifiers, `mem()`
+  and `u8`/`u16`/`u32`/`u64` to read through a pointer; a watchpoint also
+  sees the `address`, `size`, `value` and `access` that fired it. The order
+  is gdb's, which is what Ghidra's breakpoint model is built around: a
+  condition that is false is not a hit at all and does not count, while an
+  ignore count consumes a hit that did. A condition is compiled when it is
+  set, so a typo is reported there rather than at the hook, and one that
+  raises at evaluation stops and says why - a breakpoint that silently never
+  fires is much harder to notice than one that complains. `Condition` and
+  `Ignore Count` are published on the breakpoint spec under the names
+  Ghidra's own gdb connector uses, with methods to set them from the
+  Breakpoints window, and the console gains `cond` and `ignore`.
+
+- **System calls.** `syscalls.py` puts a small Linux under the emulator, so a
+  program that traps into a kernel gets an answer instead of a fault: `read`,
+  `write`, `writev`, `open`, `openat`, `close`, `lseek`, `mmap`, `mmap2`,
+  `munmap`, `brk`, `getpid`, `exit` and `exit_group`, with the call numbers
+  and argument registers of every Linux architecture here - x86, x86-64, ARM,
+  ARM64, MIPS o32 and n64, RISC-V, PowerPC and m68k - in `abi.py` beside the
+  calling conventions. Errors come back the way each architecture reports
+  them: a negative result, MIPS's separate flag register, or PowerPC's CR0
+  summary-overflow bit. There is no host filesystem: `open` sees only the
+  files the harness handed over, so pointing the debugger at a crashing input
+  cannot reach the debugging machine's own files. A handler can be replaced or
+  added by name without touching the number tables. `--syscalls`,
+  `--stdin` and `--trace-calls` on the command line, the same as
+  `OPT_SYSCALLS`, `OPT_STDIN` and `OPT_TRACE_CALLS` in the launcher, and `sys`
+  in the console.
+
+- **Function stubs.** `stubs.py` stands in for library functions the binary
+  calls but does not contain: `malloc`, `calloc`, `realloc`, `free`, the
+  `mem*` and `str*` family, `puts`, `putchar`, `exit` and `abort`. A stub is a
+  code hook on the function's entry address that reads the arguments where the
+  architecture's C calling convention puts them, does the work in Python and
+  writes the return address into the program counter, so the function's own
+  instructions never run and it does not matter that they are not there.
+  `malloc` allocates from an arena mapped on demand, with a free list that
+  does not immediately recycle the most recent block, so a use-after-free
+  still reads the bytes it had. `--symbols` binds every implementation the
+  symbol table has an address for; `stub NAME ADDR` in the console binds one
+  by hand, and `stubs` and `heap` show what is bound and what has been handed
+  out. A breakpoint on a stubbed function still stops before the stub stands
+  in for it.
+
+  Triage gets them too, with `--no-syscalls` and `--no-stubs` to turn them
+  off: a harness that reads its input with `read` would otherwise fault on
+  the trap and be triaged as a crash in the program rather than as a harness
+  that left the binary. A call the layer did not know is reported in the
+  result and in the report, because a fault just after one of those is far
+  more likely to be the missing call than a bug in the target.
+
+  Both layers are on by default, opt out per run or per harness, and both are
+  correct under reverse execution - which is the hard part, and is what
+  `effects.py` is for. A system call is not a pure function of the machine
+  state and a stub skips instructions entirely, so re-running either during a
+  replay would consume the input twice, print twice, hand out a second block,
+  or walk into code the first pass never executed. Each one therefore runs
+  once and records what it did - memory written, regions mapped, registers
+  set, output produced, and whether it ended the program - and a replay
+  applies the record instead of doing it again. Going back before a call puts
+  back the layer's own state as well, so the file offset, the break and the
+  allocator rewind with the machine and running forward again reads the same
+  bytes and returns the same address. The log is pruned as the history folds,
+  so it costs nothing the history is not paying for already.
+
 - **Reverse execution.** The processor context is checkpointed every few
   thousand instructions, along with only the pages written since the previous
   checkpoint, so stepping backwards means restoring the nearest checkpoint and
@@ -89,6 +292,48 @@ Notable changes to ghidra-unicorn. The format follows
   `--symbols-at`.
 
 ### Fixed
+
+- **Reverse-continue finds watchpoint hits, not just breakpoints.** It looked
+  only at the program counter of each instruction it replayed, and a memory
+  access leaves no mark there, so a watchpoint could never be reached going
+  backwards. The search now replays each window with the memory hooks
+  *watched* rather than merely muted, which is the only place the access is
+  visible, and considers both kinds of hit together - landing where a forward
+  run would have stopped, which for a watchpoint is after the accessing
+  instruction. Conditions are honoured too: a candidate with a condition is
+  tested in the state it would have seen, and rejected candidates are skipped
+  over to the next one back.
+
+- **Hit counts rewind with the machine.** A hit count says how many times a
+  breakpoint has fired at or before where the machine is now, so going back
+  past a hit undoes it, and an ignore count that hit consumed comes back with
+  it. Arriving backwards at a breakpoint the history does not record - one
+  set after that point was first passed - counts as its first hit. The record
+  is pruned with the history, like everything else that is kept per
+  instruction.
+
+- **Reverse step-over costs the distance travelled, not the history kept.**
+  It replayed everything retained to establish an absolute call depth before
+  it could say which instructions were in the current frame, so a long
+  session made every reverse step-over slow. Depth is now kept relative to
+  the current position, which makes it local - a call met on the way back is
+  one frame shallower, a return is one frame deeper, nothing else moves it -
+  so the search walks back only as far as it travels, one checkpoint window
+  at a time, and needs neither an absolute depth nor a stack of return
+  addresses. `arch.py` gains the return mnemonics this needs, each one
+  checked against what Capstone actually emits rather than taken from a
+  manual.
+
+- **Reverse execution rewinds a mapping.** Restoring a checkpoint mapped back
+  the regions it had and left alone any that had appeared since, so a region
+  mapped after the checkpoint survived a rewind to before it existed and the
+  program found memory it had not allocated yet. Every checkpoint now carries
+  the region list - what is mapped is part of the state - and restoring makes
+  the region set match exactly, unmapping what should not be there and
+  mapping back what should. A region that only partly overlaps is taken down
+  whole and the wanted pieces put back, which also puts right a region that
+  was split or merged since. This was a corner case while nothing could map
+  memory; with `mmap` and a growing `brk` under the emulator it is not.
 
 - **Stepping toward an end address that is a branch delay slot no longer
   loops forever.** The end was handed to Unicorn as a stop address even when

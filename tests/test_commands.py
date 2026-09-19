@@ -234,3 +234,103 @@ def test_putmem_chunks_large_regions(session):
     chunks = sorted(a for a in trace.bytes if 0x100000 <= a < 0x120000)
     assert chunks == [0x100000 + i * commands.PUT_CHUNK for i in range(4)]
     assert all(len(trace.bytes[a]) == commands.PUT_CHUNK for a in chunks)
+
+
+# ---- preloading, biggest-first is the wrong order -------------------------
+
+def big_session(sizes, pc_region=0, sp_region=None):
+    """A target with regions of the given sizes, PC in one of them."""
+    from unicorn import UC_ARCH_X86, UC_MODE_64, UC_PROT_ALL, UC_PROT_EXEC, Uc
+    from ghidraunicorn import arch
+    from ghidraunicorn.target import UnicornTarget
+    uc = Uc(UC_ARCH_X86, UC_MODE_64)
+    bases = []
+    base = 0x10_0000
+    for size in sizes:
+        uc.mem_map(base, size, UC_PROT_ALL)
+        bases.append(base)
+        base += size + 0x10_0000
+    uc.reg_write(arch.x86.UC_X86_REG_RIP, bases[pc_region])
+    uc.reg_write(arch.x86.UC_X86_REG_RSP,
+                 bases[pc_region if sp_region is None else sp_region] + 0x100)
+    return UnicornTarget(uc), bases
+
+
+def test_a_huge_region_no_longer_starves_the_code_and_the_stack():
+    """The bug this replaces: regions were taken in address order and the
+    first one that did not fit stopped the loop, so a big heap low in the
+    address space meant the listing came up empty."""
+    t, bases = big_session([64 << 20, 0x1000, 0x1000], pc_region=1, sp_region=2)
+    trace = FakeTrace()
+    commands.STATE.loaded = Loaded(t, [], 'test')
+    commands.STATE.trace = trace
+    try:
+        report = commands.preload_memory(cap=8 << 20)
+        assert bases[1] in trace.bytes, 'the region with the program counter'
+        assert bases[2] in trace.bytes, 'the region with the stack pointer'
+        assert report.whole == 2 and report.partial == 1
+    finally:
+        commands.STATE.trace = None
+        commands.STATE.loaded = None
+
+
+def test_a_region_too_big_for_the_budget_is_copied_in_part():
+    t, bases = big_session([64 << 20], pc_region=0)
+    trace = FakeTrace()
+    commands.STATE.loaded = Loaded(t, [], 'test')
+    commands.STATE.trace = trace
+    try:
+        report = commands.preload_memory(cap=4 << 20, window=1 << 20)
+        assert report.partial == 1 and report.whole == 0
+        assert 0 < report.total <= (4 << 20)
+        # The window is around the program counter, not at address zero.
+        start = min(trace.bytes)
+        assert start <= t.pc() <= start + report.total
+    finally:
+        commands.STATE.trace = None
+        commands.STATE.loaded = None
+
+
+def test_everything_fits_when_there_is_room():
+    t, bases = big_session([0x1000, 0x1000, 0x1000])
+    trace = FakeTrace()
+    commands.STATE.loaded = Loaded(t, [], 'test')
+    commands.STATE.trace = trace
+    try:
+        report = commands.preload_memory(cap=32 << 20)
+        assert report.whole == 3 and report.partial == 0 and report.skipped == 0
+        assert set(trace.bytes) == set(bases)
+    finally:
+        commands.STATE.trace = None
+        commands.STATE.loaded = None
+
+
+def test_the_ranking_puts_the_program_counter_first(session):
+    t, trace = session
+    modules = [Module('/tmp/prog', CODE, 0x1000)]
+    ranks = {start: commands.preload_priority(start, end, perms, t, modules)[0]
+             for start, end, perms in t.regions()}
+    assert ranks[CODE] == 0, 'the region holding the program counter'
+    assert ranks[0x7000] == 1, 'the region holding the stack pointer'
+    assert ranks[DATA] > 1
+
+
+def test_the_input_region_outranks_an_ordinary_one():
+    t, bases = big_session([0x1000, 0x1000])
+    plain = commands.preload_priority(bases[1], bases[1] + 0xfff, 0, t)[0]
+    favoured = commands.preload_priority(bases[1], bases[1] + 0xfff, 0, t,
+                                         input_region=(bases[1], 0x100))[0]
+    assert favoured < plain
+
+
+def test_the_report_reads_sensibly():
+    report = commands.Preloaded(total=3 << 20, whole=4, partial=1, skipped=2)
+    text = report.describe()
+    assert '3.0 MiB' in text and '4 region' in text
+    assert 'in part' in text and 'on demand' in text
+
+
+def test_put_all_hands_back_what_it_preloaded(session):
+    t, trace = session
+    assert commands.put_all(preload=True).whole == 3
+    assert commands.put_all(preload=False) is None

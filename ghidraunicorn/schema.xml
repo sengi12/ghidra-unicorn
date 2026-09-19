@@ -27,6 +27,8 @@
 		<attribute name="Enabled" schema="BOOL" />
 		<attribute-alias from="_enabled" to="Enabled" />
 		<attribute name="Hit Count" schema="INT" />
+		<attribute name="Ignore Count" schema="INT" />
+		<attribute name="Condition" schema="STRING" />
 		<attribute name="Temporary" schema="BOOL" />
 		<attribute name="_display" schema="STRING" hidden="yes" />
 		<attribute name="_order" schema="INT" hidden="yes" />

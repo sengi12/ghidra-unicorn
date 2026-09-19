@@ -19,7 +19,7 @@ steps already cross several of them.
 """
 import pytest
 
-from ghidraunicorn.target import WRITE, TargetError
+from ghidraunicorn.target import ACCESS, READ, WRITE, TargetError
 
 from test_target import CODE, DATA, make_x64
 
@@ -167,15 +167,53 @@ def test_breakpoints_and_watchpoints_do_not_fire_during_replay():
     seen = []
     t.listeners.append(seen.append)
     ev = t.goto_icount(0)                     # back to the start, silently
-    assert (bp.hit_count, wp.hit_count) == (1, 1)
     assert seen == [ev]                       # the replay itself says nothing
     t.enable_breakpoint(bp.num, False)
     t.step(4)                                 # forward again: the store hits
-    assert (bp.hit_count, wp.hit_count) == (1, 2)
+    assert (bp.hit_count, wp.hit_count) == (0, 1)
     seen.clear()
     ev = t.step_back(3)                       # replays the store from the base
-    assert (bp.hit_count, wp.hit_count) == (1, 2)
     assert seen == [ev]
+
+
+def test_going_back_undoes_the_hits_it_passes():
+    """A hit count says how many times a breakpoint has fired at or before
+    where the machine is now, so going back past a hit has to undo it."""
+    t = make_tt(interval=4)
+    bp = t.add_breakpoint(0x1007)
+    wp = t.add_watchpoint(DATA, 8, WRITE)
+    t.run()
+    t.step(3)
+    assert (bp.hit_count, wp.hit_count) == (1, 1)
+    t.step_back()                             # back past the store
+    assert (bp.hit_count, wp.hit_count) == (1, 0)
+    t.goto_icount(0)                          # back past the breakpoint too
+    assert (bp.hit_count, wp.hit_count) == (0, 0)
+
+
+def test_arriving_at_a_breakpoint_keeps_its_hit():
+    """Being stopped at a breakpoint is the state in which it has fired, so
+    the hit recorded there survives landing on it."""
+    t = make_tt()
+    bp = t.add_breakpoint(0x100d)
+    t.run()
+    assert bp.hit_count == 1 and t.icount == 3
+    t.step(2)
+    t.goto_icount(3)                          # back onto the breakpoint
+    assert bp.hit_count == 1, 'landing on a breakpoint undid its own hit'
+    t.goto_icount(2)                          # one before it
+    assert bp.hit_count == 0
+
+
+def test_an_ignore_count_comes_back_with_the_hit_it_consumed():
+    t = make_tt()
+    bp = t.add_breakpoint(0x1025)             # the spin, hit every iteration
+    t.set_ignore_count(bp.num, 2)
+    t.run()
+    assert bp.hit_count == 3 and bp.ignore_count == 0
+    t.goto_icount(0)
+    assert bp.hit_count == 0 and bp.ignore_count == 2, \
+        'the ignore count did not come back with the hits'
 
 
 def test_reverse_operations_notify_listeners_once():
@@ -373,3 +411,276 @@ def test_ghidra_reverse_methods_drive_the_target():
         assert 'history only reaches back to 0' in str(e.value)
     finally:
         commands.STATE.loaded = None
+
+
+# ---- what is mapped is part of the state ----------------------------------
+
+def regions_of(t):
+    return [start for start, _, _ in t.regions()]
+
+
+def test_a_region_mapped_after_a_checkpoint_goes_away_on_the_way_back():
+    """The mapping bug: extra regions used to survive a rewind.
+
+    Only missing regions were mapped back, so a region that appeared after
+    the checkpoint stayed mapped when the machine went back to before it
+    existed, and the programme found memory it had not allocated yet.
+    """
+    t = make_tt(interval=100)          # one checkpoint, at instruction 0
+    t.step(2)
+    t.uc.mem_map(0x9000, 0x1000)
+    t.step(2)
+    assert 0x9000 in regions_of(t)
+    t.goto_icount(0)
+    assert 0x9000 not in regions_of(t)
+
+
+def test_a_region_unmapped_later_comes_back_with_its_contents():
+    """The other direction, and the one that already worked: a region the
+    state had and the machine no longer has is mapped back, with the bytes
+    that were in it.
+
+    An external change is checkpointed at the instruction it happens at, so
+    the unmap below belongs to instruction 3 and instruction 1 is before it.
+    """
+    t = make_tt(interval=100)
+    t.step(1)                           # base checkpoint at 0, without 0x9000
+    t.uc.mem_map(0x9000, 0x1000)
+    t.write(0x9000, b'kept')            # checkpoint at 1, with it
+    t.step(2)
+    t.uc.mem_unmap(0x9000, 0x1000)
+    t.timeline.note_external_change()   # checkpoint at 3, without it again
+    assert 0x9000 not in regions_of(t)
+    t.goto_icount(1)
+    assert 0x9000 in regions_of(t)
+    assert t.read(0x9000, 4) == b'kept'
+    t.goto_icount(0)
+    assert 0x9000 not in regions_of(t)
+
+
+# ---- going backwards to a watchpoint --------------------------------------
+
+def advance(t, n):
+    """Get to instruction `n`, stepping again through anything that stops.
+
+    `step` returns as soon as something fires, so a watchpoint in the way
+    would otherwise leave the target well short of where a test meant to
+    put it - and reverse-continue looks for hits strictly *before* where it
+    starts, so standing on one changes the answer.
+    """
+    while t.icount < n:
+        t.step(n - t.icount)
+    return t
+
+
+def test_resume_back_finds_a_watchpoint_hit():
+    """It used to look only at the program counter, so a watchpoint could
+    never be reached backwards: an access leaves no trace in the trace."""
+    t = make_tt(interval=2)
+    wp = t.add_watchpoint(DATA, 8, WRITE)
+    t.run()                                   # stops after the store
+    assert t.icount == 4 and wp.hit_count == 1
+    t.step(4)
+    ev = t.resume_back()
+    assert ev.reason == 'watchpoint' and ev.breakpoint is wp
+    # Forwards, a watchpoint stops after the accessing instruction; going
+    # back to it has to land in the same place.
+    assert t.icount == 4 and t.pc() == 0x1015
+    assert 'write 8 bytes at 0x2000' in ev.description
+    assert wp.hit_count == 1, 'the replay counted the access again'
+
+
+def test_resume_back_finds_a_read_watchpoint_too():
+    t = make_tt(interval=2)
+    wp = t.add_watchpoint(DATA, 8, READ)
+    advance(t, 8)
+    ev = t.resume_back()
+    assert ev.reason == 'watchpoint' and ev.breakpoint is wp
+    assert t.icount == 5                      # after `mov rbx, [0x2000]`
+    assert 'read' in ev.description
+
+
+def test_resume_back_takes_whichever_hit_is_the_most_recent():
+    t = make_tt(interval=2)
+    bp = t.add_breakpoint(0x100a)             # instruction 2
+    wp = t.add_watchpoint(DATA, 8, WRITE)     # stops at instruction 4
+    advance(t, 8)
+    assert t.resume_back().breakpoint is wp   # 4 is nearer than 2
+    assert t.resume_back().breakpoint is bp   # then back past it
+
+
+def test_resume_back_honours_a_condition():
+    t = make_tt(interval=2)
+    bp = t.add_breakpoint(0x1025)             # the spin, hit repeatedly
+    advance(t, 12)
+    t.set_condition(bp.num, 'rbx == 99')      # never true
+    assert t.resume_back().reason == 'stopped', 'a false condition stopped it'
+    advance(t, 12)
+    t.set_condition(bp.num, 'rbx == 4')       # true from the first pass on
+    assert t.resume_back().breakpoint is bp
+
+
+def test_resume_back_honours_a_watchpoint_condition():
+    t = make_tt(interval=2)
+    wp = t.add_watchpoint(DATA, 8, WRITE)
+    t.set_condition(wp.num, 'value == 0xdead')
+    advance(t, 8)
+    assert t.resume_back().reason == 'stopped'
+    advance(t, 8)
+    t.set_condition(wp.num, 'value == 3')
+    assert t.resume_back().breakpoint is wp
+
+
+def test_resume_back_counts_a_breakpoint_set_after_the_fact():
+    """The forward run never fired it, because it did not exist then, so
+    arriving at it backwards is its first hit."""
+    t = make_tt(interval=2)
+    advance(t, 8)
+    bp = t.add_breakpoint(0x100a)
+    assert bp.hit_count == 0
+    ev = t.resume_back()
+    assert ev.breakpoint is bp and bp.hit_count == 1
+
+
+def test_resume_back_does_not_find_the_hit_it_is_already_standing_on():
+    t = make_tt(interval=2)
+    bp = t.add_breakpoint(0x100a)
+    t.run()
+    assert t.icount == 2
+    # Nothing earlier than here, so it runs out of history rather than
+    # finding the breakpoint it is already stopped at.
+    assert t.resume_back().reason == 'stopped'
+    assert t.icount == 0
+
+
+# ---- reverse step-over, and what it costs ---------------------------------
+
+NEST_CODE = 0x1000
+NEST_MID = 0x2000
+NEST_INNER = 0x3000
+
+#   i0  1000: call 0x2000        outer call
+#   i1  2000: call 0x3000        inner call
+#   i2  3000: nop
+#   i3  3001: nop
+#   i4  3002: ret            ->  0x2005
+#   i5  2005: nop
+#   i6  2006: ret            ->  0x1005
+#   i7  1005: nop
+#   i8  1006: nop
+#
+# Depths: i0 at 0, i1 at 1, i2-i4 at 2, i5-i6 at 1, i7-i8 at 0.
+
+
+def make_nested(interval=3):
+    from unicorn import UC_ARCH_X86, UC_MODE_64, Uc
+    from ghidraunicorn import arch as _arch
+    from ghidraunicorn.target import UnicornTarget
+    uc = Uc(UC_ARCH_X86, UC_MODE_64)
+    for base in (NEST_CODE, NEST_MID, NEST_INNER, 0x7000):
+        uc.mem_map(base, 0x1000)
+    uc.mem_write(NEST_CODE, bytes.fromhex('e8fb0f0000') + b'\x90\x90')
+    uc.mem_write(NEST_MID, bytes.fromhex('e8fb0f0000') + b'\x90' + b'\xc3')
+    uc.mem_write(NEST_INNER, b'\x90\x90' + b'\xc3')
+    uc.reg_write(_arch.x86.UC_X86_REG_RIP, NEST_CODE)
+    uc.reg_write(_arch.x86.UC_X86_REG_RSP, 0x7f00)
+    return UnicornTarget(uc, checkpoint_interval=interval)
+
+
+def test_reverse_step_over_skips_a_whole_nested_call():
+    t = make_nested()
+    t.step(8)
+    assert t.icount == 8 and t.pc() == 0x1006
+    t.step_back_over()                       # plain step: same frame
+    assert t.icount == 7 and t.pc() == 0x1005
+    t.step_back_over()                       # over both calls, back to the outer
+    assert t.icount == 0 and t.pc() == NEST_CODE
+
+
+def test_reverse_step_over_from_inside_a_frame_stays_in_it():
+    t = make_nested()
+    t.step(6)                                # about to run the outer `ret`
+    t.step_back_over()
+    assert t.icount == 5 and t.pc() == 0x2005
+
+
+def test_reverse_step_over_skips_the_inner_call_only():
+    t = make_nested()
+    t.step(5)                                # about to run 0x2005
+    t.step_back_over()
+    assert t.icount == 1 and t.pc() == NEST_MID
+
+
+def test_reverse_step_into_still_enters_the_callee():
+    t = make_nested()
+    t.step(8)
+    t.step_back()
+    t.step_back()                            # into the outer `ret`
+    assert t.icount == 6 and t.pc() == 0x2006
+
+
+def test_reverse_step_over_costs_the_distance_not_the_history():
+    """It used to replay everything retained to work out an absolute call
+    depth first. Depth is now tracked relative to where we are, so only the
+    checkpoint window actually travelled through gets replayed."""
+    t = make_tt(interval=50)
+    t.step(2000)                             # ends up spinning on `jmp`
+    assert t.icount == 2000 and t.earliest_icount == 0
+    replayed = []
+    original = t._replay_forward
+    t._replay_forward = lambda n, trace=None: (replayed.append(n),
+                                               original(n, trace))[1]
+    t.step_back_over()
+    assert t.icount == 1999
+    assert sum(replayed) < 200, \
+        f'replayed {sum(replayed)} instructions to move back one, of 2000 kept'
+
+
+def test_reverse_step_over_still_works_across_a_checkpoint_window():
+    """The call and the return it skips are in different windows."""
+    t = make_nested(interval=2)               # checkpoints at 0, 2, 4, 6, 8
+    t.step(8)
+    t.step_back_over()
+    t.step_back_over()
+    assert t.icount == 0 and t.pc() == NEST_CODE
+
+
+def test_without_capstone_a_reverse_step_over_is_a_reverse_step():
+    t = make_nested()
+    t.step(8)
+    t.spec = t.spec.__class__(**{**t.spec.__dict__, 'cs': None})
+    t._cs = None
+    t.step_back_over()
+    assert t.icount == 7
+    t.step_back_over()
+    assert t.icount == 6, 'with no decoder it should be a plain step back'
+
+
+def test_a_write_into_a_region_mapped_at_run_time_is_rewound():
+    """A region that appeared after the base checkpoint has no image in it,
+    so nothing used to overwrite a byte written into it and the write
+    survived the rewind. Mapping and heap regions are exactly that."""
+    t = make_tt(interval=2)
+    t.step(2)
+    t.uc.mem_map(0x9000, 0x1000)              # appears at instruction 2
+    t.step(2)
+    t.write(0x9000, b'later')                 # written at instruction 4
+    t.step(2)
+    assert t.read(0x9000, 5) == b'later'
+    t.goto_icount(3)                          # after the map, before the write
+    assert 0x9000 in regions_of(t), 'the region itself should still be there'
+    assert t.read(0x9000, 5) == b'\0' * 5, 'the write outlived the rewind'
+
+
+def test_a_region_mapped_at_run_time_keeps_what_it_should_have():
+    """The other half: a write made *before* the point restored to has to
+    come back, not be zeroed along with everything else."""
+    t = make_tt(interval=1)
+    t.step(1)
+    t.uc.mem_map(0x9000, 0x1000)
+    t.write(0x9000, b'kept')                  # instruction 1
+    t.step(3)
+    t.write(0x9000 + 0x10, b'later')          # instruction 4
+    t.goto_icount(3)
+    assert t.read(0x9000, 4) == b'kept'
+    assert t.read(0x9000 + 0x10, 5) == b'\0' * 5

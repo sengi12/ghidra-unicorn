@@ -123,3 +123,90 @@ def test_mips_dump_register_aliases(tmp_path):
     }))
     t = loaders.load_context(str(tmp_path)).target
     assert t.spec.key == 'mips' and t.reg_read('s8') == 0x1234 and t.pc() == 0x400000
+
+
+# ---- standing in for the operating system ---------------------------------
+
+def test_install_layers_puts_both_under_a_harness(tmp_path):
+    h = tmp_path / 'h.py'
+    h.write_text(HARNESS)
+    loaded = loaders.load_harness(str(h), None)
+    installed = loaders.install_layers(loaded, stdin=b'from the test')
+    assert set(installed) == {'syscalls', 'stubs'}
+    assert loaded.target.syscalls is installed['syscalls']
+    assert loaded.target.stubs is installed['stubs']
+    assert installed['syscalls'].files[0].data == b'from the test'
+
+
+def test_a_harness_can_opt_out(tmp_path):
+    h = tmp_path / 'h.py'
+    h.write_text(HARNESS + '\nSYSCALLS = False\nSTUBS = False\n')
+    loaded = loaders.load_harness(str(h), None)
+    assert loaders.install_layers(loaded) == {}
+    assert loaded.target.syscalls is None and loaded.target.stubs is None
+
+
+def test_a_harness_can_supply_its_own_input_and_files(tmp_path):
+    h = tmp_path / 'h.py'
+    h.write_text(HARNESS + '\nSTDIN = "typed in"\nFILES = {"/conf": b"k=v"}\n')
+    loaded = loaders.load_harness(str(h), None)
+    layer = loaders.install_layers(loaded)['syscalls']
+    assert layer.files[0].data == b'typed in'
+    assert layer.contents == {'/conf': b'k=v'}
+
+
+def test_the_caller_wins_over_the_harness(tmp_path):
+    h = tmp_path / 'h.py'
+    h.write_text(HARNESS + '\nSTDIN = "from the harness"\n')
+    loaded = loaders.load_harness(str(h), None)
+    layer = loaders.install_layers(loaded, stdin=b'from the caller')['syscalls']
+    assert layer.files[0].data == b'from the caller'
+
+
+def test_stubs_bind_from_a_symbol_table(tmp_path):
+    from ghidraunicorn.symbols import Symbol, SymbolTable
+    h = tmp_path / 'h.py'
+    h.write_text(HARNESS)
+    loaded = loaders.load_harness(str(h), None)
+    table = SymbolTable([Symbol('malloc', 0x400004, 4), Symbol('main', 0x400000, 4)])
+    layer = loaders.install_layers(loaded, symbols=table)['stubs']
+    assert layer.bound == {0x400004: 'malloc'}
+
+
+def test_the_example_harness_runs_through_both_layers():
+    """End to end on the example: no libc, no kernel, and it still works.
+
+    This is the whole point of the two layers, so it is worth one test that
+    goes all the way through rather than only the parts.
+    """
+    import sys
+    from ghidraunicorn.symbols import Symbol, SymbolTable
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, 'examples', 'syscalls_and_stubs.py')
+    if not os.path.isfile(path):
+        pytest.skip('example harness not in this checkout')
+    loaded = loaders.load_harness(path, None)
+    module = loaded.module
+    table = SymbolTable([Symbol(n, a, 1) for n, a in module.stubs_at().items()])
+    printed = []
+    layers = loaders.install_layers(
+        loaded, symbols=table, stdin=b'hello from the test\n',
+        on_output=lambda fd, data: printed.append(data))
+    t = loaded.target
+
+    ev = t.run()
+    assert ev.reason == 'exit' and t.terminated
+    assert printed == [b'hello from the test\n']
+    names = sorted({r.name for r in layers['syscalls'].records})
+    assert names == ['exit', 'read', 'write']
+    assert layers['stubs'].calls == {'malloc': 1, 'strlen': 1}
+
+    # And all of it rewinds: go back before the read and run it again.
+    read = [r for r in layers['syscalls'].records if r.name == 'read'][0]
+    t.goto_icount(read.icount)
+    assert not t.terminated
+    assert layers['syscalls'].files[0].offset == 0
+    printed.clear()
+    assert t.run().reason == 'exit'
+    assert printed == [b'hello from the test\n'], 'the re-run read different bytes'

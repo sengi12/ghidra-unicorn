@@ -31,16 +31,40 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   checkpoint, and steps backwards by restoring the nearest checkpoint and
   replaying forward in silence. With gdb this needs rr; with an emulator it
   falls out of the design. `goto` jumps to any instruction number in the
-  recorded history.
+  recorded history. Reverse-continue finds watchpoint hits as well as
+  breakpoints, hit counts rewind along with the machine, and a reverse
+  step-over costs the distance it travels rather than the whole history.
+- **An operating system underneath**, so a harness no longer has to avoid
+  every call that leaves the binary. System calls are serviced by a small
+  Linux layer (`read`, `write`, `open`, `mmap`, `brk`, `exit` and friends)
+  with the right numbers and argument registers for each architecture, and
+  `malloc`, `free` and the common `str*`/`mem*` functions are stood in for at
+  the addresses your symbols give them. Both are on by default, both rewind
+  correctly when you step backwards, and `open` can see only the files the
+  harness handed over - never the debugging machine's own.
 - **Breakpoints and watchpoints** from Ghidra's Breakpoints window or the
   Listing: execute, read, write and access. A breakpoint stops *before* its
   instruction; a watchpoint stops *after* the accessing instruction completes,
   with PC on the next one, so resuming never re-runs an instruction.
+- **Conditions and ignore counts** on any breakpoint or watchpoint. The
+  condition is a Python expression with the registers in scope -
+  `cond 3 rdi == 0 and u32(rsp + 8) > 0x1000` - and a watchpoint condition
+  also sees the `address`, `size`, `value` and `access` that fired it.
+  `ignore 3 100` passes it a hundred more times first. Both show in Ghidra's
+  Breakpoints window and can be set from there.
 - **State**: every stop is a new snapshot in the Time window. Registers,
   the memory map (with permissions), a module for the image so Ghidra maps
   the trace onto your static listing, and, by default, all mapped memory
   copied into the trace at launch (capped at 32 MiB) so the Listing is
-  populated immediately. Everything else is read on demand.
+  populated immediately. The cap is spent on the regions that matter first -
+  the code you are stopped in, the stack, the input - and a region too big
+  for what is left gets a window around the interesting part rather than
+  being skipped, so a multi-gigabyte dump still comes up usable. Everything
+  else is read on demand.
+- **Thumb tracking**: ARM code that switches instruction set with `blx` or
+  `bx` is followed as it runs, so each stop tells Ghidra which set it is in
+  and mixed code disassembles correctly instead of being pinned to the
+  language chosen at launch.
 - **Architectures**: x86-64, x86, AArch64, ARM and Thumb, MIPS32 and MIPS64,
   RISC-V 32 and 64, PowerPC 32 and 64, m68k, SPARC 32 and 64, and TriCore,
   in both endiannesses wherever Unicorn supports the pair. Twenty in all, and
@@ -55,7 +79,9 @@ Ghidra Debugger  <-- Trace RMI (TCP) -->  ghidraunicorn  <-->  unicorn.Uc
   dereferenced, the decoded status register, disassembly around PC and the
   stack; and it takes short commands (`c`, `si`, `ni`, `b`, `watch`, `x/8xw`,
   `r cpsr.M 0x13`...). Anything else is Python with `target` and `uc` in
-  scope.
+  scope. `disas` and `x/5i` disassemble, `hd` is a hexdump with an ASCII
+  pane, `find` searches memory for text, bytes or a value, and `rwatch RAX`
+  stops the moment a register changes.
 
 Tested with Ghidra 12.1.3 (JDK 21) and Unicorn 2.1.
 
@@ -292,6 +318,91 @@ launches the connector; the difference is only which terminal you type in.
 Pair it with [ghidra-aflcov](https://github.com/sengi12/ghidra-aflcov) to
 paint the fuzzer's coverage over the same listing you are stepping through.
 
+## Scripted and headless runs
+
+`--commands` runs console commands as soon as the target is loaded, and
+`--batch` then exits instead of prompting. With `--batch` there is no Ghidra
+in the picture at all:
+
+```
+python -m ghidraunicorn --harness examples/syscalls_and_stubs.py --batch \
+    --commands 'b 0x400020; c; r rax; assert target.reg_read("RAX") == 16'
+```
+
+It is the same console the prompt uses, so anything you can type you can
+script. Anything that is not a command is Python, which means `assert` is
+the assertion language and needs nothing new: the exit status is non-zero if
+any command failed, whether that was a bad command, an exception, a syntax
+error, or a script that ended part way through an unclosed bracket. That is
+enough to put a harness in CI and have it fail the build when the crash
+stops reproducing.
+
+`--commands-file` reads the same thing from a file. Commands split on
+newlines and semicolons, quotes are respected, and `#` starts a comment.
+
+## A context panel in Ghidra
+
+`ghidra_scripts/UnicornContextPanel.py` puts the same view the console
+prints into a window beside the Listing: registers with pointers
+dereferenced, the decoded status register, disassembly and the stack. Add
+this repository's `ghidra_scripts` directory in the Script Manager and run
+it. It draws from the trace and refreshes on a timer, so it follows the Time
+window: scrub back and it shows that point in history.
+
+It is a floating window rather than a docked panel because JPype cannot
+extend Java classes and Ghidra's `ComponentProvider` is one; docking would
+mean writing it in Java and reimplementing the renderer, which is the one
+thing worth avoiding.
+
+Not yet run against a real Ghidra - see [CHANGELOG.md](CHANGELOG.md).
+
+## Checking one emulator against the other
+
+Unicorn and Ghidra's p-code emulator implement the same instruction sets
+from entirely separate descriptions of them, so where they disagree about
+what an instruction did, one of them is wrong:
+
+```
+GHIDRA_INSTALL_DIR=... python tools/differential.py \
+    --harness examples/afl_unicorn_simple.py \
+    --program simple_target.bin --language MIPS:BE:32:default \
+    --base 0x100000 --steps 500
+```
+
+Both engines are put in the same state, stepped together, and compared after
+every instruction; the first disagreement is reported with the instruction
+and the registers that differ. It needs no mapping between the two, because
+the register names in `arch.py` are already Ghidra's.
+
+The p-code half has not yet been run against a real Ghidra - see
+[CHANGELOG.md](CHANGELOG.md).
+
+## Recording a session
+
+`--record session.gu`, or `record session.gu` in the console, logs
+everything to a file:
+
+```
+# ghidra-unicorn session, 2026-09-18T21:55:59Z
+# architecture: x64 (x86:LE:64:default)
+# launched as: python -m ghidraunicorn --harness h.py --record session.gu
+b 0x40000c
+#  | breakpoint 1 at 0x40000c
+c
+# stop: breakpoint - Breakpoint 1 at 0x40000c at instruction 3
+#  | ... the whole context at the stop ...
+```
+
+The commands are plain lines and everything else is a comment, so the same
+file reads as a transcript and replays as a script:
+
+```
+python -m ghidraunicorn --harness h.py --batch --commands-file session.gu
+```
+
+Which makes it worth attaching to a bug report: whoever reads it can see
+what you did and run it.
+
 ## Triaging a fuzzing run
 
 Stepping one crash is useful; a fuzzer hands you a directory of them. Replay
@@ -358,6 +469,58 @@ python tools/export_symbols.py ~/ghidra_projects/unicorn/unicorn.gpr \
 
 An enclosing function wins over a nearer generated label, which is how gdb and
 IDA report an address.
+
+## When the program calls out of the binary
+
+A harness is a piece of a process with nothing behind it, so historically
+anything that trapped into a kernel or called into libc stopped the run. Two
+layers fix that, and both are on by default.
+
+**System calls.** The trap - `syscall`, `int 0x80`, `svc`, `sc`, `ecall`,
+`trap #0`, whichever this architecture uses - is serviced instead of
+faulting. `read`, `write`, `writev`, `open`, `openat`, `close`, `lseek`,
+`mmap`, `munmap`, `brk`, `getpid`, `exit` and `exit_group` are there, with
+the call numbers and argument registers of x86, x86-64, ARM, ARM64, MIPS
+(o32 and n64), RISC-V, PowerPC and m68k. Failures come back the way each
+architecture reports them, including MIPS's separate flag register and
+PowerPC's CR0 bit. Anything not in the table returns ENOSYS and shows up in
+`sys`, rather than failing silently.
+
+`--stdin FILE` is what the program reads from descriptor 0. There is no host
+filesystem: `open` sees only files the harness declared in a module-level
+`FILES` dict, so pointing this at a crashing input cannot reach your own
+files.
+
+**Function stubs.** Point `--symbols` at an exported symbol table and every
+implementation it can place is bound: `malloc`, `calloc`, `realloc`, `free`,
+`memcpy`, `memmove`, `memset`, `memcmp`, `strlen`, `strcpy`, `strncpy`,
+`strcat`, `strcmp`, `strncmp`, `strchr`, `strrchr`, `strstr`, `strdup`,
+`puts`, `putchar`, `exit`, `abort`. `malloc` allocates from an arena mapped
+on demand. A stub replaces the whole call, so stepping over a stubbed
+function is one step - but a breakpoint on it still stops before it stands
+in.
+
+In the console, `sys` shows the calls made, `stub` what is bound (and
+`stub NAME ADDR` binds one by hand), and `heap` the blocks handed out.
+A harness opts out with `SYSCALLS = False` or `STUBS = False`, or supplies
+its own `STDIN` and `FILES`.
+
+Both layers are correct under reverse execution, which is the interesting
+part: a system call is not a pure function of the machine state, and a stub
+skips the function's instructions entirely, so simply re-running them during
+a replay would consume the input twice, print twice, or walk into code the
+first pass never executed. Instead each call runs once and records what it
+did, and a replay applies the record. Step back over a `read` and the input
+is un-read, the heap block is un-allocated, and running forward again gives
+exactly the same bytes at exactly the same address.
+
+`examples/syscalls_and_stubs.py` is a complete worked example: a program
+with no libc and no kernel that reads, allocates, measures, prints and
+exits.
+
+Triage gets both layers as well (`--no-syscalls` and `--no-stubs` turn them
+off), and reports any call it did not know: a fault just after one of those
+is much more likely to be the missing call than a bug in the target.
 
 ## Coverage and input provenance
 
@@ -456,6 +619,14 @@ Debugger tool, launches the *unicorn* offer through the real launcher script
 and checks the trace Ghidra built: registers, preloaded bytes, module, then
 step, step-over, breakpoint, resume, register write, and run-to-end.
 
+`.github/workflows/tests.yml` runs the unit tests on the oldest and a current
+Python, and then uses the connector on itself: the example harness is run to
+completion headlessly, its recording is replayed, reverse execution is taken
+over the end of the programme and back, and a deliberately failing assertion
+has to fail the build. The Ghidra half is not there, because it needs an
+installation and a display; `tools/e2e_ghidra.py` stays a thing to run by
+hand.
+
 ## Where the pretty output lives
 
 Ghidra's Debugger already has the windows a gef/pwndbg context is made of,
@@ -476,24 +647,29 @@ change on this side: everything it would show is already in the trace.
 ## What is planned
 
 [TODO.md](TODO.md) is the roadmap and [CHANGELOG.md](CHANGELOG.md) records
-what has shipped. The short version of what is coming: reverse execution, so
-Ghidra's step-back buttons work; batch crash triage over an afl-unicorn
-crashes directory; more processors and a Windows launcher; symbols and
-syscall stubs; and a coverage handoff to ghidra-aflcov.
+what has shipped. Everything on the roadmap is now written, and there are no
+known bugs outstanding. Two items - the context panel and the p-code side of
+the differential runner - were written without a Ghidra installation to try
+them against, and are marked as such until someone runs them once.
 
 ## Limitations and ideas
 
 - One thread, one frame. Ghidra unwinds the stack itself from registers and
   memory when it has a mapped program with function information.
 - Step-over needs Capstone to recognise calls; without it, it steps into.
-- Thumb harnesses get the `ARM:LE:32:v8T` language. Mixed ARM/Thumb code
-  would need context-register tracking.
+- The operating system under the emulator is a small one: the calls a
+  harness usually needs, and ENOSYS for the rest, which `sys` shows rather
+  than hiding. There is deliberately no host filesystem behind `open`.
+- A stubbed function is one step, not a step into: the stub stands in for
+  the whole call. A breakpoint on it still stops before it.
 - Going backwards is bounded by what is kept: checkpoints are dropped oldest
   first once they exceed the memory budget, and the connector says how far
   back it can still reach rather than guessing.
-- Reverse-continue finds execute breakpoints, not watchpoint hits.
-- [TODO.md](TODO.md) has the rest of the roadmap, including syscall stubs and
-  a context panel inside Ghidra.
+- A register watchpoint is a comparison made once per instruction, because
+  Unicorn has no hook for one, and it is not published to Ghidra: the
+  trace's breakpoint kinds are all about addresses.
+- SPARC and TriCore have calling conventions but no system call table, and
+  Unicorn 2.1.4 cannot map memory for TriCore at all.
 
 ## License
 

@@ -7,16 +7,19 @@ stacks, and Ghidra unwinds the stack on its own from the registers and memory
 we publish.
 """
 from contextlib import contextmanager
+from dataclasses import dataclass
 import os
 import socket
 import threading
 from typing import Dict, Generator, List, Optional, Tuple
 
+from unicorn import UC_PROT_EXEC
+
 from ghidratrace.client import (Address, Client, RegVal, Trace, TraceObject,
                                 Transaction)
 
 from .loaders import Loaded, Module
-from .target import EXECUTE, Breakpoint, StopEvent, UnicornTarget
+from .target import EXECUTE, REGISTER, Breakpoint, StopEvent, UnicornTarget
 
 PAGE_SIZE = 4096
 # Trace RMI refuses messages over 64 KiB; keep byte payloads well under it.
@@ -301,7 +304,9 @@ def putreg() -> Dict[str, List[str]]:
             continue
         v &= (1 << (8 * r.size)) - 1
         values.append(RegVal(r.name, v.to_bytes(r.size, 'big')))
-    for name, v in target.spec.context.items():
+    # From the live machine, not the launch spec: ARM changes instruction
+    # set as it runs, and Ghidra disassembles by TMode.
+    for name, v in target.context().items():
         values.append(RegVal(name, v.to_bytes(1, 'big')))
     for name, v in target.flags().items():
         values.append(RegVal(name, bytes([v])))
@@ -347,16 +352,102 @@ def putmem_state(start: int, length: int, state: str) -> None:
     trace.set_memory_state(trace.extra.map(start).extend(length), state)
 
 
-def preload_memory(cap: int = 32 * 1024 * 1024) -> int:
-    """Copy every mapped region into the trace, up to `cap` bytes total."""
+@dataclass
+class Preloaded:
+    """What a preload managed to get into the trace."""
+    total: int = 0
+    whole: int = 0             # regions copied entirely
+    partial: int = 0           # regions copied in part, around what matters
+    skipped: int = 0           # regions there was no room left for
+
+    def describe(self) -> str:
+        text = f'{self.total / (1 << 20):.1f} MiB preloaded, {self.whole} region(s)'
+        if self.partial:
+            text += f', {self.partial} in part'
+        if self.skipped:
+            text += f', {self.skipped} left to be read on demand'
+        return text
+
+
+def preload_priority(start: int, end: int, perms: int, target,
+                     modules=(), input_region=None) -> Tuple[int, int]:
+    """How much this region deserves the budget. Lower sorts first.
+
+    Order matters far more than the cap does. A dump with a large heap early
+    in the address space used to exhaust the budget before reaching the code
+    and the stack, which are the two things anybody wants to see first, so
+    the regions are ranked by what they are rather than taken in address
+    order. The size is the tie-break, so the budget buys as many regions as
+    it can.
+    """
+    def holds(address):
+        return address is not None and start <= address <= end
+
+    try:
+        pc, sp = target.pc(), target.sp()
+    except Exception:
+        pc = sp = None
+    if holds(pc):
+        rank = 0
+    elif holds(sp):
+        rank = 1
+    elif input_region and holds(input_region[0]):
+        rank = 2
+    elif any(m.base <= end and start <= m.end for m in modules):
+        rank = 3
+    elif perms & UC_PROT_EXEC:
+        rank = 4
+    else:
+        rank = 5
+    return rank, end - start + 1
+
+
+def preload_memory(cap: int = 32 * 1024 * 1024,
+                   window: int = 1 << 20) -> Preloaded:
+    """Copy mapped memory into the trace, the regions that matter first.
+
+    A region too big for what is left of the budget is not skipped: a window
+    of it is copied around whatever made it interesting - the program
+    counter, the stack pointer - because part of a huge region is far more
+    use than none of it, and the rest is read on demand anyway.
+    """
     target = STATE.target
-    total = 0
-    for s, e, _ in target.regions():
-        size = e - s + 1
-        if total + size > cap:
-            break
-        total += putmem(s, size, pages=False)
-    return total
+    loaded = STATE.loaded
+    modules = getattr(loaded, 'modules', ()) or ()
+    input_region = getattr(loaded, 'input_region', None)
+    report = Preloaded()
+    regions = sorted(
+        target.regions(),
+        key=lambda r: preload_priority(r[0], r[1], r[2], target, modules,
+                                       input_region))
+    for start, end, _ in regions:
+        size = end - start + 1
+        room = cap - report.total
+        if room <= 0:
+            report.skipped += 1
+            continue
+        if size <= room:
+            report.total += putmem(start, size, pages=False)
+            report.whole += 1
+            continue
+        length = min(room, max(window, PAGE_SIZE))
+        if length < PAGE_SIZE:
+            report.skipped += 1
+            continue
+        focus = next((a for a in _focus_addresses(target)
+                      if start <= a <= end), start)
+        lo = max(start, focus - length // 2) & ~(PAGE_SIZE - 1)
+        lo = max(start, min(lo, end + 1 - length))
+        report.total += putmem(lo, min(length, end + 1 - lo), pages=False)
+        report.partial += 1
+    return report
+
+
+def _focus_addresses(target) -> List[int]:
+    try:
+        return [target.pc(), target.sp()]
+    except Exception:
+        return []
 
 
 def put_regions() -> None:
@@ -403,6 +494,11 @@ def put_breakpoints() -> None:
     keys: List[str] = []
     pkeys: List[str] = []
     for bp in target.breakpoints.values():
+        if bp.kind == REGISTER:
+            # Ghidra's breakpoint kinds are all about addresses, and a
+            # register watch has none. It stays a console feature rather
+            # than being published at a made-up location.
+            continue
         keys.append(BREAK_KEY_PATTERN.format(breaknum=bp.num))
         bpath = BREAK_PATTERN.format(breaknum=bp.num)
         bobj = trace.create_object(bpath)
@@ -410,6 +506,8 @@ def put_breakpoints() -> None:
         bobj.set_value('Expression', bp.describe())
         bobj.set_value('Kinds', bp.kind)
         bobj.set_value('Hit Count', bp.hit_count)
+        bobj.set_value('Ignore Count', bp.ignore_count)
+        bobj.set_value('Condition', bp.condition or '')
         bobj.set_value('Temporary', bp.temporary)
         bobj.set_value('_display', f'[{bp.num}] {bp.describe()}')
         lpath = BREAK_LOC_PATTERN.format(breaknum=bp.num, locnum=1)
@@ -428,7 +526,8 @@ def put_breakpoints() -> None:
     pbobj.retain_values(pkeys)
 
 
-def put_all(preload: bool = True, preload_cap: int = 32 * 1024 * 1024) -> None:
+def put_all(preload: bool = True,
+            preload_cap: int = 32 * 1024 * 1024) -> Optional['Preloaded']:
     put_processes('STOPPED', 'Launched')
     put_environment()
     put_threads()
@@ -439,10 +538,10 @@ def put_all(preload: bool = True, preload_cap: int = 32 * 1024 * 1024) -> None:
     put_breakpoints()
     target = STATE.target
     if preload:
-        preload_memory(preload_cap)
-    else:
-        putmem(target.pc(), 1)
-        putmem(target.sp(), 1)
+        return preload_memory(preload_cap)
+    putmem(target.pc(), 1)
+    putmem(target.sp(), 1)
+    return None
 
 
 def activate() -> None:

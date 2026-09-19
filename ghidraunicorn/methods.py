@@ -440,6 +440,31 @@ def toggle_breakpoint_location(location: BreakpointLocation, enabled: bool) -> N
     _after_bp_change()
 
 
+@REGISTRY.method(display='Set Condition')
+def set_breakpoint_condition(
+        breakpoint: BreakpointSpec,
+        condition: Annotated[str, ParamDesc(display='Condition')]) -> None:
+    """Stop here only when a Python expression is true.
+
+    Registers are in scope by name, in either case, along with pc, sp,
+    icount, hits, and u8/u16/u32/u64 to read through a pointer: for
+    instance `rdi == 0` or `u32(rsp + 8) > 0x1000`. Empty clears it.
+    """
+    bp = find_bp_by_obj(breakpoint)
+    commands.STATE.target.set_condition(bp.num, condition)
+    _after_bp_change()
+
+
+@REGISTRY.method(display='Set Ignore Count')
+def set_breakpoint_ignore_count(
+        breakpoint: BreakpointSpec,
+        count: Annotated[int, ParamDesc(display='Count')]) -> None:
+    """Pass this breakpoint `count` more times before stopping at it."""
+    bp = find_bp_by_obj(breakpoint)
+    commands.STATE.target.set_ignore_count(bp.num, count)
+    _after_bp_change()
+
+
 @REGISTRY.method(action='delete', display='Delete Breakpoint')
 def delete_breakpoint(breakpoint: BreakpointSpec) -> None:
     """Delete a breakpoint."""
