@@ -7,12 +7,15 @@ has shipped. This file is the part that is not obvious from the code.
 
 ## Where things are
 
-This machine is set up already; none of it needs installing again.
+This is one developer's machine, already set up; none of it needs installing
+again. If you are reading this anywhere else, the paths below are not yours -
+[README.md](README.md) has the install that is. What is worth reading here is
+everything after this table.
 
 | What | Where |
 |---|---|
 | This checkout (the durable one) | `/Volumes/Linux Share/ghidra-unicorn` |
-| Remote | `sengi12/ghidra-unicorn`, private, branch `main`, tag `v0.1.0` |
+| Remote | `sengi12/ghidra-unicorn`, branch `main`, tag `v0.1.0` |
 | Ghidra 12.1.3 | `~/Applications/ghidra_12.1.3_PUBLIC` |
 | JDK 21, which Ghidra needs | `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` |
 | Python with every dependency | `~/.pyenv/versions/ghidra/bin/python` |
